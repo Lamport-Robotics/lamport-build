@@ -38,7 +38,8 @@ struct UserBubble: View {
 struct AssistantTurn: View {
     @EnvironmentObject var desk: DeskModel
     var turn: Turn; var last: Bool
-    var writes: Int { Set(turn.parts.compactMap { if case .tool(let r) = $0, r.name == "write_file" || r.name == "edit_file", r.status == .ok { return r.detail }; return nil }).count }
+    var writes: Int { Set(flat(turn.parts).compactMap { r in (r.name == "write_file" || r.name == "edit_file") && r.status == .ok ? r.detail : nil }).count }
+    func flat(_ parts: [Part]) -> [ToolRow] { parts.flatMap { p -> [ToolRow] in switch p { case .tool(let r): return [r]; case .agent(let g): return flat(g.parts); default: return [] } } }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -47,12 +48,7 @@ struct AssistantTurn: View {
                 Text(turn.at.formatted(date: .omitted, time: .shortened)).font(Theme.mono(11)).foregroundStyle(Color(hex: 0x5e5e5e))
             }
             if turn.parts.isEmpty && !turn.text.isEmpty { MarkdownText(turn.text) }
-            ForEach(turn.parts) { part in
-                switch part {
-                case .text(_, let s): MarkdownText(s)
-                case .tool(let r): ToolRowView(row: r)
-                }
-            }
+            ForEach(turn.parts) { part in PartView(part: part) }
             if turn.pending {
                 HStack(spacing: 8) {
                     Cursor()
@@ -100,15 +96,69 @@ struct MarkdownText: View {
     }
 }
 
+struct PartView: View {
+    var part: Part
+    var body: some View {
+        switch part {
+        case .text(_, let s): MarkdownText(s)
+        case .tool(let r): ToolRowView(row: r)
+        case .todo(_, let items): TodoCard(items: items)
+        case .agent(let g): AgentCard(group: g)
+        }
+    }
+}
+struct TodoCard: View {
+    var items: [TodoItem]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) { Text("PLAN").font(Theme.mono(10, .medium)).tracking(1.4).foregroundStyle(Color(hex: 0x7a7a7a)); Spacer(); Text("\(items.filter { $0.status == "done" }.count)/\(items.count)").font(Theme.mono(10)).foregroundStyle(Color(hex: 0x6a6a6a)) }
+            ForEach(items) { it in
+                HStack(alignment: .firstTextBaseline, spacing: 9) {
+                    Text(it.status == "done" ? "■" : it.status == "doing" ? "▸" : "□").font(Theme.mono(10)).foregroundStyle(it.status == "done" ? Theme.green : it.status == "doing" ? Theme.amber : Color(hex: 0x5a5a5a)).frame(width: 10)
+                    Text(it.text).font(Theme.sans(12.5)).foregroundStyle(it.status == "done" ? Color(hex: 0x8a8a8a) : Color(hex: 0xd4d4d4)).strikethrough(it.status == "done", color: Color(hex: 0x5a5a5a))
+                }
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.white.opacity(0.025)))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color.white.opacity(0.05)))
+    }
+}
+struct AgentCard: View {
+    var group: AgentGroup
+    @State private var open: Bool? = nil
+    var isOpen: Bool { open ?? (group.status == "running") }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button { open = !isOpen } label: {
+                HStack(spacing: 10) {
+                    Text(group.status == "running" ? "[…]" : "[+]").font(Theme.mono(11, .medium)).foregroundStyle(group.status == "running" ? Theme.amber : Theme.green)
+                    Text("Agent").font(Theme.mono(11, .medium)).foregroundStyle(Color(hex: 0xd0d0d0))
+                    Text(group.mode).font(Theme.mono(10)).foregroundStyle(Color(hex: 0x8a8a8a)).padding(.horizontal, 6).padding(.vertical, 1).background(Capsule().fill(Color.white.opacity(0.06)))
+                    Text(group.brief).font(Theme.sans(12)).foregroundStyle(Color(hex: 0x9a9a9a)).lineLimit(1)
+                    Spacer()
+                    Image(systemName: isOpen ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Color(hex: 0x6a6a6a))
+                }.contentShape(Rectangle())
+            }.buttonStyle(Quiet())
+            if isOpen {
+                VStack(alignment: .leading, spacing: 8) { ForEach(group.parts) { p in PartView(part: p) } }
+                    .padding(.leading, 12).overlay(alignment: .leading) { Rectangle().fill(Color.white.opacity(0.08)).frame(width: 1) }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color(hex: 0x1c1c1e)))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color.white.opacity(0.06)))
+    }
+}
 struct ToolRowView: View {
     @EnvironmentObject var desk: DeskModel
     var row: ToolRow
-    var mark: (String, Color) { switch row.status { case .running: ("[…]", Theme.amber); case .ok: ("[+]", Theme.green); case .fail: ("[!]", Theme.red) } }
+    var mark: (String, Color) { if row.approval && row.decision == nil && row.status == .running { return ("[?]", Theme.amber) }; switch row.status { case .running: return ("[…]", Theme.amber); case .ok: return ("[+]", Theme.green); case .fail: return ("[!]", Theme.red) } }
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Text(mark.0).foregroundStyle(mark.1)
-                Text(row.label).foregroundStyle(Color(hex: 0xd0d0d0))
+                Text(row.name == "web_fetch" ? "Fetch" : row.name == "spawn_agent" ? "Delegate" : row.name == "job_status" ? "Job" : row.name == "job_stop" ? "Stop job" : row.label).foregroundStyle(Color(hex: 0xd0d0d0))
                 Text(row.detail).foregroundStyle(Color(hex: 0x9a9a9a)).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 if let n = row.note { Text(n).foregroundStyle(Color(hex: 0x6a6a6a)) }
@@ -122,6 +172,19 @@ struct ToolRowView: View {
                 .padding(8)
                 .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.black.opacity(0.35)))
                 .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.white.opacity(0.06)))
+                .padding(.leading, 24)
+            }
+            if row.approval && row.decision == nil && row.status == .running {
+                HStack(spacing: 8) {
+                    Text("This command can delete, publish, deploy or touch secrets. Run it?").font(Theme.sans(12)).foregroundStyle(Color(hex: 0xd8c9a0))
+                    Spacer()
+                    Button { desk.decide(row.id, true) } label: { Text("Allow").font(Theme.sans(12, .medium)).foregroundStyle(Color(hex: 0x111111)).padding(.horizontal, 12).frame(height: 26).background(Capsule().fill(Color(hex: 0xe6e6e6))) }.buttonStyle(Quiet()).keyboardShortcut(.return, modifiers: [])
+                    Button { desk.decide(row.id, true, always: true) } label: { Text("Always this session").font(Theme.sans(12)).foregroundStyle(Color(hex: 0xcfcfcf)).padding(.horizontal, 12).frame(height: 26).background(Capsule().fill(Color.white.opacity(0.08))) }.buttonStyle(Quiet())
+                    Button { desk.decide(row.id, false) } label: { Text("Deny").font(Theme.sans(12)).foregroundStyle(Color(hex: 0xe0a0a0)).padding(.horizontal, 12).frame(height: 26).background(Capsule().fill(Color.white.opacity(0.06))) }.buttonStyle(Quiet()).keyboardShortcut(.escape, modifiers: [])
+                }
+                .padding(.horizontal, 10).padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color(hex: 0xe2c36b).opacity(0.08)))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color(hex: 0xe2c36b).opacity(0.25)))
                 .padding(.leading, 24)
             }
             if !row.out.isEmpty {

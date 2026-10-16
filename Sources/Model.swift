@@ -10,6 +10,8 @@ struct ToolRow: Identifiable {
     var note: String? = nil
     var diff: (old: [String], new: [String])? = nil
     var out: [String] = []
+    var approval = false          // the member confirms before it runs
+    var decision: Bool? = nil     // nil while waiting
     var label: String {
         switch name { case "run_command": "Run"; case "write_file": "Write"; case "edit_file": "Edit"; case "read_file": "Read"; case "search": "Search"; case "delete_file": "Delete"; default: "List" }
     }
@@ -22,9 +24,20 @@ struct ToolRow: Identifiable {
         }
     }
 }
-enum Part: Identifiable {
-    case text(id: String, String), tool(ToolRow)
-    var id: String { switch self { case .text(let id, _): id; case .tool(let r): r.id } }
+struct TodoItem: Identifiable { var id: String { text }; var text: String; var status: String }
+struct AgentGroup: Identifiable { let id: String; var brief: String; var mode: String; var status: String; var parts: [Part] = []; var open = true }
+indirect enum Part: Identifiable {
+    case text(id: String, String), tool(ToolRow), agent(AgentGroup), todo(id: String, [TodoItem])
+    var id: String { switch self { case .text(let id, _): id; case .tool(let r): r.id; case .agent(let g): "agent-\(g.id)"; case .todo(let id, _): id } }
+}
+/// a background job: a dev server, a watcher, a long test run; kept across turns, reported to the agent on the next one
+@MainActor final class Job: ObservableObject, Identifiable {
+    let id: String; let command: String; let started = Date()
+    @Published var status = "running"; @Published var exit: Int32? = nil; @Published var tail: [String] = []
+    var reported = false; var run: ShellRun? = nil
+    init(id: String, command: String) { self.id = id; self.command = command }
+    func line(_ l: String) { tail.append(l); if tail.count > 400 { tail.removeFirst(tail.count - 400) } }
+    var summary: String { "\(status)\(exit.map { " exit \($0)" } ?? "")\n" + tail.suffix(60).joined(separator: "\n") }
 }
 struct Turn: Identifiable {
     let id = UUID()
@@ -74,6 +87,10 @@ final class DeskModel: ObservableObject {
     @Published var recent: [String] = UserDefaults.standard.stringArray(forKey: "recentFolders") ?? []
     @Published var toast: String? = nil
     @Published var termOpen = false
+    @Published var jobs: [Job] = []
+    @Published var approvals: [String: (Bool) -> Void] = [:]
+    var alwaysAllow: Set<String> = []
+    let autoApprove = CommandLine.arguments.contains("--auto-approve")
     let runtime = LocalRuntime()
     private var streamTask: Task<Void, Never>? = nil
     private var autoFixes = 0
@@ -89,7 +106,7 @@ final class DeskModel: ObservableObject {
         // launch arguments, for scripts and tests: --folder <path> opens it, --prompt <text> sends a first request
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--folder"), i + 1 < args.count {
-            Task { await openFolder(URL(fileURLWithPath: args[i + 1])); if let j = args.firstIndex(of: "--prompt"), j + 1 < args.count { await loadMeta(); send(args[j + 1]) } }
+            Task { await loadMeta(); await openFolder(URL(fileURLWithPath: args[i + 1])); if let j = args.firstIndex(of: "--prompt"), j + 1 < args.count { send(args[j + 1]) } }
         }
     }
 
@@ -164,7 +181,9 @@ final class DeskModel: ObservableObject {
         let ps = paths
         selected = ps.first { $0.range(of: #"README\.md$|App\.tsx$|index\.ts$|lib\.rs$|package\.json$"#, options: .regularExpression) != nil } ?? ps.first
         if tree["Anchor.toml"] != nil || tree.keys.contains(where: { $0.range(of: #"programs/.*/lib\.rs$"#, options: .regularExpression) != nil }) { kind = "program" }
-        else if tree["index.html"] != nil || tree["package.json"] != nil { kind = "dapp" }
+        else if tree["index.html"] != nil || (tree["package.json"]?.range(of: #""(react|vite|next|svelte|vue|@solana/wallet-adapter-react)""#, options: .regularExpression) != nil) { kind = "dapp" }
+        else if tree["package.json"] != nil { kind = "script" }
+        if signedIn && sessions.isEmpty { await loadSessions() }
         let known = session ?? sessions.first { $0.root == u.path }
         if let known, let p = try? await API.call("/api/projects/\(known.id)") {
             projectId = known.id; projectName = p["name"] as? String; kind = p["kind"] as? String ?? kind; model = p["model"] as? String ?? model
@@ -194,10 +213,20 @@ final class DeskModel: ObservableObject {
 
     // ---- the agent
     private func withLast(_ f: (inout Turn) -> Void) { guard !turns.isEmpty else { return }; f(&turns[turns.count - 1]) }
-    private func appendText(_ s: String) { withLast { t in if case .text(let id, let old)? = t.parts.last { t.parts[t.parts.count - 1] = .text(id: id, old + s) } else { t.parts.append(.text(id: UUID().uuidString, s)) } } }
-    private func addTool(_ r: ToolRow) { withLast { $0.parts.append(.tool(r)) } }
-    private func patchTool(_ id: String, _ f: (inout ToolRow) -> Void) { withLast { t in for i in t.parts.indices { if case .tool(var r) = t.parts[i], r.id == id { f(&r); t.parts[i] = .tool(r) } } } }
-    private var lastRunning: ToolRow? { for p in turns.last?.parts.reversed() ?? [] { if case .tool(let r) = p, r.status == .running { return r } }; return nil }
+    /// the parts list an event belongs to: the turn's own, or a sub-agent's group inside it
+    private func withParts(_ agent: String?, _ f: (inout [Part]) -> Void) {
+        withLast { t in
+            guard let agent else { f(&t.parts); return }
+            for i in t.parts.indices { if case .agent(var g) = t.parts[i], g.id == agent { f(&g.parts); t.parts[i] = .agent(g); return } }
+            f(&t.parts)
+        }
+    }
+    private func appendText(_ s: String, agent: String? = nil) { withParts(agent) { parts in if case .text(let id, let old)? = parts.last { parts[parts.count - 1] = .text(id: id, old + s) } else { parts.append(.text(id: UUID().uuidString, s)) } } }
+    private func addTool(_ r: ToolRow, agent: String? = nil) { withParts(agent) { $0.append(.tool(r)) } }
+    private func patchTool(_ id: String, agent: String? = nil, _ f: (inout ToolRow) -> Void) { withParts(agent) { parts in for i in parts.indices { if case .tool(var r) = parts[i], r.id == id { f(&r); parts[i] = .tool(r) } } } }
+    private func allTools(_ parts: [Part]) -> [ToolRow] { parts.flatMap { p -> [ToolRow] in switch p { case .tool(let r): return [r]; case .agent(let g): return allTools(g.parts); default: return [] } } }
+    private var lastRunning: ToolRow? { allTools(turns.last?.parts ?? []).reversed().first { $0.status == .running } }
+    var waitingApproval: ToolRow? { allTools(turns.last?.parts ?? []).first { $0.approval && $0.decision == nil && $0.status == .running } }
 
     func send(_ raw: String, auto: Bool = false) {
         let q0 = raw.trimmingCharacters(in: .whitespacesAndNewlines); guard !q0.isEmpty, !busy else { return }
@@ -215,6 +244,8 @@ final class DeskModel: ObservableObject {
         var body: [String: Any] = ["kind": kind, "model": model, "prompt": q, "root": folder.path, "name": folder.lastPathComponent]
         if let projectId { body["projectId"] = projectId }
         if let notes { body["notes"] = notes }
+        let finished = jobs.filter { !$0.reported && $0.status != "running" }
+        if !finished.isEmpty { body["jobs"] = finished.map { ["id": $0.id, "command": $0.command, "status": $0.status, "exit": $0.exit as Any, "tail": $0.tail.suffix(30).joined(separator: "\n")] }; finished.forEach { $0.reported = true } }
         streamTask = Task { [weak self] in
             guard let self else { return }
             var sid: String? = nil; var pending: [Task<Void, Never>] = []; var wrote: [String] = []; var wrotePkg = false
@@ -226,11 +257,23 @@ final class DeskModel: ObservableObject {
                         projectId = ev["id"] as? String; projectName = ev["name"] as? String; sid = ev["session"] as? String
                         if let n = ev["turnsLeft"] as? Int { turnsLeft = n }
                     case "served": served = (ev["model"] as? String ?? "") + ((ev["provider"] as? String).map { " · \($0.lowercased())" } ?? "")
-                    case "text": appendText(ev["delta"] as? String ?? "")
+                    case "text": appendText(ev["delta"] as? String ?? "", agent: ev["agent"] as? String)
+                    case "agent":
+                        guard let id = ev["id"] as? String else { continue }
+                        let status = ev["status"] as? String ?? "running"
+                        if status == "running" { withParts(ev["agent"] as? String) { $0.append(.agent(AgentGroup(id: id, brief: ev["brief"] as? String ?? "", mode: ev["mode"] as? String ?? "explore", status: "running"))) } }
+                        else { withLast { t in for i in t.parts.indices { if case .agent(var g) = t.parts[i], g.id == id { g.status = status; g.open = false; t.parts[i] = .agent(g) } } } }
+                    case "todo":
+                        let items = (ev["items"] as? [[String: Any]] ?? []).map { TodoItem(text: $0["text"] as? String ?? "", status: $0["status"] as? String ?? "pending") }
+                        withLast { t in if let i = t.parts.firstIndex(where: { if case .todo = $0 { return true }; return false }) { t.parts[i] = .todo(id: "todo", items) } else { t.parts.append(.todo(id: "todo", items)) } }
                     case "tool":
                         guard let sid, let id = ev["id"] as? String, let name = ev["name"] as? String else { continue }
                         let args = ev["args"] as? [String: Any] ?? [:]
-                        pending.append(Task { await self.runTool(sid: sid, id: id, name: name, args: args) })
+                        let tag = ev["agent"] as? String
+                        if name == "web_fetch" || name == "spawn_agent" { addTool(ToolRow(id: id, name: name, detail: name == "web_fetch" ? (args["url"] as? String ?? "") : (args["brief"] as? String ?? "").prefix(80) + "…"), agent: tag); continue }
+                        pending.append(Task { await self.runTool(sid: sid, id: id, name: name, args: args, approval: ev["approval"] as? Bool ?? false, agent: tag) })
+                    case "tool_result":
+                        if let id = ev["id"] as? String, let name = ev["name"] as? String, name == "web_fetch" || name == "spawn_agent" { patchTool(id, agent: ev["agent"] as? String) { $0.status = (ev["ok"] as? Bool ?? true) ? .ok : .fail; if name == "web_fetch" { $0.note = String((ev["preview"] as? String ?? "").split(separator: "\n").first ?? "") } } }
                     case "file":
                         if let p = ev["path"] as? String { wrote.append(p); if p == "package.json" { wrotePkg = true } }
                     case "done":
@@ -255,22 +298,48 @@ final class DeskModel: ObservableObject {
             await loadSessions()
         }
     }
-    func stop() { streamTask?.cancel(); busy = false; withLast { $0.pending = false } }
-    private func runTool(sid: String, id: String, name: String, args: [String: Any]) async {
+    func stop() { streamTask?.cancel(); busy = false; withLast { $0.pending = false }; for (_, f) in approvals { f(false) }; approvals = [:] }
+    func decide(_ id: String, _ allow: Bool, always: Bool = false) {
+        if always, let r = allTools(turns.last?.parts ?? []).first(where: { $0.id == id }) { alwaysAllow.insert(r.detail.split(separator: " ").prefix(2).joined(separator: " ")) }
+        approvals[id]?(allow)
+    }
+    func stopJob(_ j: Job) { j.run?.stop(); j.status = "stopped" }
+    func clearJobs() { jobs.removeAll { $0.status != "running" } }
+    private func runTool(sid: String, id: String, name: String, args: [String: Any], approval: Bool = false, agent: String? = nil) async {
         var row = ToolRow(id: id, name: name, detail: ToolRow.detail(name, args))
         if name == "edit_file" { row.diff = ((args["old_string"] as? String ?? "").components(separatedBy: "\n"), (args["new_string"] as? String ?? "").components(separatedBy: "\n")) }
-        addTool(row)
-        guard let folder else { await post(sid, id, "tool failed: no folder is open"); patchTool(id) { $0.status = .fail }; return }
+        if name == "job_status" || name == "job_stop" { row.detail = jobs.first { $0.id == (args["id"] as? String ?? "") }?.command ?? (args["id"] as? String ?? "") }
+        if (args["background"] as? Bool) == true { row.note = "background" }
+        let cmd0 = args["command"] as? String ?? ""
+        let key = cmd0.split(separator: " ").prefix(2).joined(separator: " ")
+        row.approval = approval && !autoApprove && !alwaysAllow.contains(key)
+        addTool(row, agent: agent)
+        if row.approval {
+            let allowed = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in approvals[id] = { c.resume(returning: $0) } }
+            approvals[id] = nil
+            patchTool(id, agent: agent) { $0.decision = allowed; if !allowed { $0.status = .fail; $0.note = "declined" } }
+            if !allowed { await post(sid, id, "tool failed: the member declined this command; do not retry it another way"); return }
+        }
+        guard let folder else { await post(sid, id, "tool failed: no folder is open"); patchTool(id, agent: agent) { $0.status = .fail }; return }
         let tools = LocalTools(root: folder)
         var result = ""; var ok = true; var newContent: String? = nil; var note: String? = nil
-        if name == "run_command" {
-            let cmd = args["command"] as? String ?? ""
+        if name == "job_status" || name == "job_stop" {
+            if let j = jobs.first(where: { $0.id == (args["id"] as? String ?? "") }) { if name == "job_stop" { j.run?.stop(); j.status = "stopped"; result = "stopped \(j.command)" } else { result = j.summary; note = j.status } }
+            else { ok = false; result = "tool failed: no such job" }
+        } else if name == "run_command", (args["background"] as? Bool) == true {
+            let jid = String(UUID().uuidString.prefix(8)); let job = Job(id: jid, command: cmd0)
+            let run = ShellRun(root: folder, command: cmd0) { l in Task { @MainActor in job.line(l) } }
+            run.process.terminationHandler = { p in Task { @MainActor in job.exit = p.terminationStatus; job.status = job.status == "stopped" ? "stopped" : (p.terminationStatus == 0 ? "exited" : "failed") } }
+            job.run = run; jobs.append(job)
+            do { try run.start(); try? await Task.sleep(for: .seconds(2)); result = "started background job \(jid): `\(cmd0)`\n\(job.summary)"; note = "job \(jid)" } catch { ok = false; result = "tool failed: \(error.localizedDescription)" }
+        } else if name == "run_command" {
+            let cmd = cmd0
             let timeout = min(900, Double(args["timeoutSec"] as? Int ?? 300))
             var lines: [String] = []; let lock = NSLock()
-            let run = ShellRun(root: folder, command: cmd) { l in lock.lock(); lines.append(l); let snap = Array(lines.suffix(40)); let n = lines.count; lock.unlock(); if n % 5 == 1 { Task { @MainActor in self.patchTool(id) { $0.out = snap } } } }
+            let run = ShellRun(root: folder, command: cmd) { l in lock.lock(); lines.append(l); let snap = Array(lines.suffix(40)); let n = lines.count; lock.unlock(); if n % 5 == 1 { Task { @MainActor in self.patchTool(id, agent: agent) { $0.out = snap } } } }
             let r = await run.run(timeout: timeout)
             lock.lock(); let all = lines; lock.unlock()
-            patchTool(id) { $0.out = Array(all.suffix(40)) }
+            patchTool(id, agent: agent) { $0.out = Array(all.suffix(40)) }
             ok = r.code == 0
             result = "exit \(r.code.map(String.init) ?? "?")\(r.timedOut ? " (timed out)" : "")\n" + String(all.suffix(120).joined(separator: "\n").suffix(20_000))
         } else {
@@ -301,7 +370,7 @@ final class DeskModel: ObservableObject {
             if name == "edit_file", let c = newContent { files[p] = c }
             if name == "delete_file", ok { files[p] = nil; if selected == p { selected = nil } }
         }
-        patchTool(id) { $0.status = ok ? .ok : .fail; if let note { $0.note = note }; if !ok, name != "run_command" { $0.note = String(result.prefix(90)) } }
+        patchTool(id, agent: agent) { $0.status = ok ? .ok : .fail; if let note { $0.note = note }; if !ok, name != "run_command" { $0.note = String(result.prefix(90)) } }
         await post(sid, id, result)
     }
     private func post(_ sid: String, _ id: String, _ result: String) async { _ = try? await API.call("/api/build/local/\(sid)/tool/\(id)", method: "POST", json: ["result": String(result.prefix(120_000))]) }
@@ -314,6 +383,7 @@ final class DeskModel: ObservableObject {
         await runtime.run(root: folder, files: files)
     }
     func doing() -> String {
+        if let w = waitingApproval { return "waiting for your approval: \(w.detail.prefix(40))" }
         guard let r = lastRunning else { return turns.last?.parts.isEmpty == false ? "thinking" : "reading the brief" }
         switch r.name {
         case "run_command": return "running \(r.detail.prefix(40))"
@@ -322,6 +392,9 @@ final class DeskModel: ObservableObject {
         case "edit_file": return "editing \(r.detail)"
         case "write_file": return "writing \(r.detail)"
         case "read_file": return "reading \(r.detail)"
+        case "web_fetch": return "fetching \(r.detail.prefix(50))"
+        case "spawn_agent": return "a sub-agent is working"
+        case "job_status": return "checking \(r.detail.prefix(40))"
         default: return "working"
         }
     }
