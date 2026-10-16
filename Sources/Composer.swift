@@ -62,6 +62,13 @@ struct Composer: View {
         .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Color.white.opacity(focused ? 0.12 : 0.05)))
         .shadow(color: .black.opacity(0.25), radius: 20, y: 8)
         .onAppear { focused = true }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            for p in providers { p.loadDataRepresentation(forTypeIdentifier: "public.file-url") { data, _ in
+                guard let data, let u = URL(dataRepresentation: data, relativeTo: nil) else { return }
+                Task { @MainActor in let root = desk.folder?.path; let rel = root != nil && u.path.hasPrefix(root! + "/") ? String(u.path.dropFirst(root!.count + 1)) : u.path; desk.prompt += (desk.prompt.isEmpty || desk.prompt.hasSuffix(" ") ? "" : " ") + "`\(rel)` " }
+            } }
+            return true
+        }
     }
 }
 

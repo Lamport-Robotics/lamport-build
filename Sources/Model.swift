@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UserNotifications
 
 enum ToolStatus { case running, ok, fail }
 struct ToolRow: Identifiable {
@@ -48,7 +49,7 @@ struct Turn: Identifiable {
     var pending = false
     var at = Date()
 }
-struct FileNode: Identifiable { var id: String { path }; var path: String; var depth: Int; var isLast: Bool }
+struct FileNode: Identifiable { var id: String { path }; var path: String; var depth: Int; var isLast: Bool; var isDir = false; var open = true }
 struct ModelChoice: Identifiable, Hashable { let id: String; let label: String; let note: String; let pro: Bool; let available: Bool }
 struct Session: Identifiable { let id: String; let name: String; let kind: String; let root: String?; let updated: Date }
 struct Slash { let cmd: String; let hint: String; let prompt: String? }
@@ -89,14 +90,25 @@ final class DeskModel: ObservableObject {
     @Published var termOpen = false
     @Published var jobs: [Job] = []
     @Published var approvals: [String: (Bool) -> Void] = [:]
+    @Published var fileList: [String] = []          // every text file in the folder; contents load on demand
+    @Published var collapsed: Set<String> = []       // folders folded in the tree
+    @Published var changes: [(path: String, before: Int?, after: Int?)] = []
+    @Published var canUndo = false
+    @Published var update: (version: String, url: URL, notes: String)? = nil
+    @Published var shellBusy = false
     var alwaysAllow: Set<String> = []
-    let autoApprove = CommandLine.arguments.contains("--auto-approve")
+    private var originals: [String: String?] = [:]   // what the files looked like before this turn, for undo
+    private var lastUndo: (project: String?, originals: [String: String?])? = nil
+    var autoApprove: Bool { CommandLine.arguments.contains("--auto-approve") || UserDefaults.standard.bool(forKey: "autoApproveAll") }
+    var version: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0" }
     let runtime = LocalRuntime()
     private var streamTask: Task<Void, Never>? = nil
     private var autoFixes = 0
     private var runtimeWatch: Task<Void, Never>? = nil
 
     init() {
+        if let m = UserDefaults.standard.string(forKey: "defaultModel"), !m.isEmpty { model = m }
+        if let d = UserDefaults.standard.string(forKey: "alwaysAllow")?.data(using: .utf8), let r = try? JSONDecoder().decode([String].self, from: d) { alwaysAllow = Set(r) }
         signedIn = API.token != nil || API.isLocalDev
         who = UserDefaults.standard.string(forKey: "who")
         if API.isLocalDev && who == nil { who = "dev" }
@@ -110,12 +122,34 @@ final class DeskModel: ObservableObject {
         }
     }
 
-    var paths: [String] { files.keys.sorted { a, b in let da = a.split(separator: "/").count, db = b.split(separator: "/").count; return da != db ? da > db : a < b } }
-    var tree: [FileNode] { let ps = paths; return ps.enumerated().map { i, p in let depth = p.split(separator: "/").count - 1; return FileNode(path: p, depth: depth, isLast: i == ps.count - 1 || (ps[i + 1].split(separator: "/").count - 1) < depth) } }
+    var paths: [String] { Array(Set(fileList).union(files.keys)).sorted { a, b in let da = a.split(separator: "/").count, db = b.split(separator: "/").count; return da != db ? da > db : a < b } }
+    /// the tree as rows: folders first within each level, folded folders hide their children
+    var tree: [FileNode] {
+        var dirs = Set<String>()
+        for p in paths { var parts = p.split(separator: "/").map(String.init); parts.removeLast(); for i in parts.indices { dirs.insert(parts[0...i].joined(separator: "/")) } }
+        var rows: [FileNode] = []
+        func children(of dir: String, depth: Int) {
+            let prefix = dir.isEmpty ? "" : dir + "/"
+            let sub = dirs.filter { $0.hasPrefix(prefix) && !$0.dropFirst(prefix.count).contains("/") && $0 != dir }.sorted()
+            let fs = paths.filter { $0.hasPrefix(prefix) && !$0.dropFirst(prefix.count).contains("/") }.sorted()
+            let all = sub.map { ($0, true) } + fs.map { ($0, false) }
+            for (i, (p, isDir)) in all.enumerated() {
+                rows.append(FileNode(path: p, depth: depth, isLast: i == all.count - 1, isDir: isDir, open: !collapsed.contains(p)))
+                if isDir && !collapsed.contains(p) { children(of: p, depth: depth + 1) }
+            }
+        }
+        children(of: "", depth: 0)
+        return rows
+    }
+    func toggle(_ dir: String) { if collapsed.contains(dir) { collapsed.remove(dir) } else { collapsed.insert(dir) } }
+    /// contents are read when first needed, so a big repository opens instantly
+    func content(_ path: String) -> String? { if let c = files[path] { return c }; guard let folder else { return nil }; if let s = try? String(contentsOf: folder.appendingPathComponent(path), encoding: .utf8) { files[path] = s; return s }; return nil }
+    func select(_ path: String) { selected = path; _ = content(path) }
     var currentModel: ModelChoice? { models.first { $0.id == model } }
     var folderName: String? { folder?.lastPathComponent }
-    var isStatic: Bool { files["index.html"] != nil && files["package.json"] == nil }
-    var canPreview: Bool { kind != "program" && (isStatic || files["package.json"] != nil) }
+    var has: (String) -> Bool { { [self] p in fileList.contains(p) || files[p] != nil } }
+    var isStatic: Bool { has("index.html") && !has("package.json") }
+    var canPreview: Bool { kind != "program" && (isStatic || has("package.json")) }
     var staticDoc: String? {
         guard isStatic, var html = files["index.html"] else { return nil }
         for (p, c) in files where p.hasSuffix(".css") { html = html.replacingOccurrences(of: "<link rel=\"stylesheet\" href=\"\(p)\">", with: "<style>\(c)</style>").replacingOccurrences(of: "<link rel=\"stylesheet\" href=\"./\(p)\">", with: "<style>\(c)</style>") }
@@ -172,14 +206,21 @@ final class DeskModel: ObservableObject {
     }
     func openFolder(_ u: URL, session: Session? = nil) async {
         await runtime.stop(); streamTask?.cancel()
-        folder = u; files = [:]; selected = nil; turns = []; projectId = nil; projectName = nil; autoFixes = 0; sideTab = 0
+        folder = u; files = [:]; fileList = []; collapsed = []; selected = nil; turns = []; projectId = nil; projectName = nil; autoFixes = 0; sideTab = 0; changes = []; canUndo = false
         var rec = [u.path] + recent.filter { $0 != u.path }; if rec.count > 8 { rec = Array(rec.prefix(8)) }
         recent = rec; UserDefaults.standard.set(rec, forKey: "recentFolders")
         let tools = LocalTools(root: u)
-        let tree = await Task.detached { tools.readTree() }.value
+        let list = await Task.detached { tools.walk(maxFiles: 5000) }.value
+        fileList = list
+        var tree: [String: String] = [:]
+        for p in ["package.json", "index.html", "LAMPORT.md", "CLAUDE.md", "AGENTS.md", "README.md", "Anchor.toml"] where list.contains(p) { if let c = try? String(contentsOf: u.appendingPathComponent(p), encoding: .utf8) { tree[p] = c } }
+        for p in list where p.hasSuffix(".css") || (p.hasSuffix(".js") && !p.contains("/")) { if tree["index.html"] != nil, tree["package.json"] == nil, let c = try? String(contentsOf: u.appendingPathComponent(p), encoding: .utf8) { tree[p] = c } }
         files = tree
+        // the deepest folders start folded so a large tree stays readable
+        var dirs = Set<String>(); for p in list { var parts = p.split(separator: "/").map(String.init); parts.removeLast(); if parts.count >= 2 { dirs.insert(parts.joined(separator: "/")) } }
+        collapsed = dirs
         let ps = paths
-        selected = ps.first { $0.range(of: #"README\.md$|App\.tsx$|index\.ts$|lib\.rs$|package\.json$"#, options: .regularExpression) != nil } ?? ps.first
+        if let first = ps.first(where: { $0.range(of: #"^(README\.md|src/App\.tsx|src/index\.ts|src/main\.tsx|programs/.*/lib\.rs|package\.json)$"#, options: .regularExpression) != nil }) ?? ps.first { select(first) }
         if tree["Anchor.toml"] != nil || tree.keys.contains(where: { $0.range(of: #"programs/.*/lib\.rs$"#, options: .regularExpression) != nil }) { kind = "program" }
         else if tree["index.html"] != nil || (tree["package.json"]?.range(of: #""(react|vite|next|svelte|vue|@solana/wallet-adapter-react)""#, options: .regularExpression) != nil) { kind = "dapp" }
         else if tree["package.json"] != nil { kind = "script" }
@@ -206,7 +247,7 @@ final class DeskModel: ObservableObject {
     func newSession() { streamTask?.cancel(); Task { await runtime.stop() }; turns = []; projectId = nil; projectName = nil; autoFixes = 0; say("New session in \(folderName ?? "no folder")") }
     func deleteSession(_ s: Session) { Task { _ = try? await API.call("/api/projects/\(s.id)", method: "DELETE"); if projectId == s.id { newSession() }; await loadSessions() } }
     func saveFile(_ path: String, _ content: String) {
-        files[path] = content
+        files[path] = content; if !fileList.contains(path) { fileList.append(path) }
         guard let folder else { return }
         let tools = LocalTools(root: folder); Task.detached { _ = try? tools.write(path, content) }
     }
@@ -230,15 +271,15 @@ final class DeskModel: ObservableObject {
 
     func send(_ raw: String, auto: Bool = false) {
         let q0 = raw.trimmingCharacters(in: .whitespacesAndNewlines); guard !q0.isEmpty, !busy else { return }
-        guard signedIn else { signIn(); return }
-        guard let folder else { pickFolder(); return }
+        guard signedIn else { Log.write("send: not signed in"); signIn(); return }
+        guard let folder else { Log.write("send: no folder"); pickFolder(); return }
         let word = q0.split(separator: " ").first.map(String.init) ?? q0
         let slash = q0.hasPrefix("/") ? SLASH.first { $0.cmd == word } : nil
         if let slash, slash.cmd == "/clear" { prompt = ""; newSession(); return }
         let rest = q0.dropFirst(slash?.cmd.count ?? 0).trimmingCharacters(in: .whitespaces)
         let q = slash?.prompt.map { rest.isEmpty ? $0 : "\($0)\n\n\(rest)" } ?? q0
         if !auto { autoFixes = 0 }
-        prompt = ""; busy = true
+        prompt = ""; busy = true; originals = [:]; changes = []
         turns.append(Turn(role: .user, text: slash != nil ? q0 : q)); turns.append(Turn(role: .assistant, pending: true))
         let notes = ["LAMPORT.md", "CLAUDE.md", "AGENTS.md"].compactMap { files[$0] }.first
         var body: [String: Any] = ["kind": kind, "model": model, "prompt": q, "root": folder.path, "name": folder.lastPathComponent]
@@ -246,6 +287,7 @@ final class DeskModel: ObservableObject {
         if let notes { body["notes"] = notes }
         let finished = jobs.filter { !$0.reported && $0.status != "running" }
         if !finished.isEmpty { body["jobs"] = finished.map { ["id": $0.id, "command": $0.command, "status": $0.status, "exit": $0.exit as Any, "tail": $0.tail.suffix(30).joined(separator: "\n")] }; finished.forEach { $0.reported = true } }
+        Log.write("turn start model=\(model) kind=\(kind) project=\(projectId ?? "new") folder=\(folder.lastPathComponent)")
         streamTask = Task { [weak self] in
             guard let self else { return }
             var sid: String? = nil; var pending: [Task<Void, Never>] = []; var wrote: [String] = []; var wrotePkg = false
@@ -270,10 +312,10 @@ final class DeskModel: ObservableObject {
                         guard let sid, let id = ev["id"] as? String, let name = ev["name"] as? String else { continue }
                         let args = ev["args"] as? [String: Any] ?? [:]
                         let tag = ev["agent"] as? String
-                        if name == "web_fetch" || name == "spawn_agent" { addTool(ToolRow(id: id, name: name, detail: name == "web_fetch" ? (args["url"] as? String ?? "") : (args["brief"] as? String ?? "").prefix(80) + "…"), agent: tag); continue }
+                        if name == "web_fetch" || name == "spawn_agent" || name == "web_search" { addTool(ToolRow(id: id, name: name, detail: name == "web_fetch" ? (args["url"] as? String ?? "") : name == "web_search" ? (args["query"] as? String ?? "") : (args["brief"] as? String ?? "").prefix(80) + "…"), agent: tag); continue }
                         pending.append(Task { await self.runTool(sid: sid, id: id, name: name, args: args, approval: ev["approval"] as? Bool ?? false, agent: tag) })
                     case "tool_result":
-                        if let id = ev["id"] as? String, let name = ev["name"] as? String, name == "web_fetch" || name == "spawn_agent" { patchTool(id, agent: ev["agent"] as? String) { $0.status = (ev["ok"] as? Bool ?? true) ? .ok : .fail; if name == "web_fetch" { $0.note = String((ev["preview"] as? String ?? "").split(separator: "\n").first ?? "") } } }
+                        if let id = ev["id"] as? String, let name = ev["name"] as? String, name == "web_fetch" || name == "spawn_agent" || name == "web_search" { patchTool(id, agent: ev["agent"] as? String) { $0.status = (ev["ok"] as? Bool ?? true) ? .ok : .fail; if name == "web_fetch" { $0.note = String((ev["preview"] as? String ?? "").split(separator: "\n").first ?? "") }; if name == "web_search" { let n = (ev["preview"] as? String ?? "").components(separatedBy: "\n").filter { $0.range(of: #"^\d+\. "#, options: .regularExpression) != nil }.count; $0.note = n > 0 ? "\(n)+ results" : nil } } }
                     case "file":
                         if let p = ev["path"] as? String { wrote.append(p); if p == "package.json" { wrotePkg = true } }
                     case "done":
@@ -286,24 +328,68 @@ final class DeskModel: ObservableObject {
                             if fl.contains("package.json"), wrotePkg || [.idle, .failed, .exited].contains(runtime.status) { Task { try? await Task.sleep(for: .milliseconds(50)); await self.startRun(wrotePkg && self.runtime.status != .idle ? "package.json changed, installing again" : "installing and starting the project") } }
                             else if fl.contains("index.html") || runtime.status == .running { sideTab = 1 }
                         }
-                    case "error": appendText("\n\n" + (ev["message"] as? String ?? "The build stopped on an error.")); withLast { $0.pending = false }
+                    case "error": appendText("\n\n" + (ev["message"] as? String ?? "The build stopped on an error.")); withLast { $0.pending = false }; Log.write("turn error: \(ev["message"] ?? "")")
                     default: break
                     }
                 }
-            } catch { if !(error is CancellationError) { appendText("\n\nCould not reach the build desk: \(error.localizedDescription)") } }
+            } catch { if !(error is CancellationError) { appendText("\n\nCould not reach the build desk: \(error.localizedDescription)"); Log.write("build stream: \(error.localizedDescription)") } }
             for t in pending { await t.value }
             withLast { $0.pending = false }
             busy = false
-            if !wrote.isEmpty, let folder = self.folder { let tools = LocalTools(root: folder); let fresh = await Task.detached { tools.readTree() }.value; files = fresh; if selected == nil || files[selected!] == nil { selected = wrote.last } }
+            if let folder = self.folder {
+                changes = originals.keys.sorted().compactMap { path in
+                    let before = originals[path]!.map { $0.components(separatedBy: "\n").count }
+                    let after = (try? String(contentsOf: folder.appendingPathComponent(path), encoding: .utf8)).map { $0.components(separatedBy: "\n").count }
+                    return before == nil && after == nil ? nil : (path, before, after)
+                }
+            }
+            Log.write("turn end changes=\(changes.count) tools=\(allTools(turns.last?.parts ?? []).count)")
+            if !originals.isEmpty { lastUndo = (projectId, originals); canUndo = true } else { canUndo = false }
+            notify(title: "Lamport Build", body: changes.isEmpty ? "The agent finished." : "The agent finished · \(changes.count) file\(changes.count == 1 ? "" : "s") changed")
+            if !wrote.isEmpty, let folder = self.folder { let tools = LocalTools(root: folder); fileList = await Task.detached { tools.walk(maxFiles: 5000) }.value; for p in wrote { files[p] = nil }; if let sel = selected { files[sel] = nil; _ = content(sel) } else if let last = wrote.last { select(last) } }
             await loadSessions()
         }
     }
     func stop() { streamTask?.cancel(); busy = false; withLast { $0.pending = false }; for (_, f) in approvals { f(false) }; approvals = [:] }
     func decide(_ id: String, _ allow: Bool, always: Bool = false) {
-        if always, let r = allTools(turns.last?.parts ?? []).first(where: { $0.id == id }) { alwaysAllow.insert(r.detail.split(separator: " ").prefix(2).joined(separator: " ")) }
+        if always, let r = allTools(turns.last?.parts ?? []).first(where: { $0.id == id }) { rememberAlways(r.detail.split(separator: " ").prefix(2).joined(separator: " ")) }
         approvals[id]?(allow)
     }
     func stopJob(_ j: Job) { j.run?.stop(); j.status = "stopped" }
+    /// the last turn, taken back: files on disk return to how they were, the server mirror follows, the turn leaves the transcript
+    func undoLastTurn() {
+        guard let u = lastUndo, let folder, !busy else { return }
+        let tools = LocalTools(root: folder)
+        for (path, original) in u.originals { if let o = original { _ = try? tools.write(path, o) } else { _ = try? tools.delete(path) } }
+        for (path, original) in u.originals { if original == nil { fileList.removeAll { $0 == path }; files[path] = nil; if selected == path { selected = nil } } else { files[path] = nil; _ = content(path) } }
+        if turns.count >= 2 { turns.removeLast(2) }
+        lastUndo = nil; canUndo = false; changes = []
+        if let id = u.project { Task { _ = try? await API.call("/api/projects/\(id)/undo", method: "POST", json: [:]) } }
+        say("Last turn undone · \(u.originals.count) file\(u.originals.count == 1 ? "" : "s") restored")
+    }
+    private func notify(title: String, body: String) {
+        guard UserDefaults.standard.object(forKey: "notify") as? Bool ?? true, !NSApp.isActive else { return }
+        let c = UNUserNotificationCenter.current()
+        c.requestAuthorization(options: [.alert, .sound, .badge]) { ok, _ in
+            guard ok else { return }
+            let n = UNMutableNotificationContent(); n.title = title; n.body = String(body.prefix(140)); n.sound = .default
+            c.add(UNNotificationRequest(identifier: UUID().uuidString, content: n, trigger: nil))
+            DispatchQueue.main.async { NSApp.dockTile.badgeLabel = "1" }
+        }
+    }
+    func rememberAlways(_ key: String) { alwaysAllow.insert(key); if let d = try? JSONEncoder().encode(Array(alwaysAllow).sorted()), let s = String(data: d, encoding: .utf8) { UserDefaults.standard.set(s, forKey: "alwaysAllow") } }
+    /// a command the member types into the terminal pane, run in the folder with the same shell the agent uses
+    func runShell(_ cmd: String) {
+        guard let folder, !cmd.trimmingCharacters(in: .whitespaces).isEmpty, !shellBusy else { return }
+        shellBusy = true; runtime.line("$ \(cmd)")
+        Task { let r = ShellRun(root: folder, command: cmd) { [weak self] l in Task { @MainActor in self?.runtime.line(l) } }; let res = await r.run(timeout: 600); runtime.line("[exit \(res.code.map(String.init) ?? "?")]"); shellBusy = false }
+    }
+    /// a newer build on the site, offered once; downloads are the member's click, never silent
+    func checkForUpdate() async {
+        guard !API.isLocalDev else { return }
+        guard let (data, _) = try? await URLSession.shared.data(from: API.siteURL("/mac/latest.json")), let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let v = o["version"] as? String, let u = (o["url"] as? String).flatMap(URL.init) else { return }
+        if v.compare(version, options: .numeric) == .orderedDescending { update = (v, u, o["notes"] as? String ?? "") }
+    }
     func clearJobs() { jobs.removeAll { $0.status != "running" } }
     private func runTool(sid: String, id: String, name: String, args: [String: Any], approval: Bool = false, agent: String? = nil) async {
         var row = ToolRow(id: id, name: name, detail: ToolRow.detail(name, args))
@@ -315,6 +401,7 @@ final class DeskModel: ObservableObject {
         row.approval = approval && !autoApprove && !alwaysAllow.contains(key)
         addTool(row, agent: agent)
         if row.approval {
+            notify(title: "Approval needed", body: cmd0)
             let allowed = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in approvals[id] = { c.resume(returning: $0) } }
             approvals[id] = nil
             patchTool(id, agent: agent) { $0.decision = allowed; if !allowed { $0.status = .fail; $0.note = "declined" } }
@@ -322,6 +409,7 @@ final class DeskModel: ObservableObject {
         }
         guard let folder else { await post(sid, id, "tool failed: no folder is open"); patchTool(id, agent: agent) { $0.status = .fail }; return }
         let tools = LocalTools(root: folder)
+        if ["write_file", "edit_file", "delete_file"].contains(name), let p = args["path"] as? String, originals[p] == nil { originals[p] = .some(try? String(contentsOf: folder.appendingPathComponent(p), encoding: .utf8)) }
         var result = ""; var ok = true; var newContent: String? = nil; var note: String? = nil
         if name == "job_status" || name == "job_stop" {
             if let j = jobs.first(where: { $0.id == (args["id"] as? String ?? "") }) { if name == "job_stop" { j.run?.stop(); j.status = "stopped"; result = "stopped \(j.command)" } else { result = j.summary; note = j.status } }
@@ -366,9 +454,10 @@ final class DeskModel: ObservableObject {
             }
         }
         if let p = args["path"] as? String {
-            if name == "write_file", ok { files[p] = args["content"] as? String ?? ""; if selected == nil { selected = p } }
+            if (name == "write_file" || name == "edit_file"), ok, let pid = projectId, let body = name == "write_file" ? args["content"] as? String : newContent { Task { _ = try? await API.call("/api/projects/\(pid)/file", method: "PUT", json: ["path": p, "content": body]) } }
+            if name == "write_file", ok { files[p] = args["content"] as? String ?? ""; if !fileList.contains(p) { fileList.append(p) }; if selected == nil { selected = p } }
             if name == "edit_file", let c = newContent { files[p] = c }
-            if name == "delete_file", ok { files[p] = nil; if selected == p { selected = nil } }
+            if name == "delete_file", ok { files[p] = nil; fileList.removeAll { $0 == p }; if selected == p { selected = nil } }
         }
         patchTool(id, agent: agent) { $0.status = ok ? .ok : .fail; if let note { $0.note = note }; if !ok, name != "run_command" { $0.note = String(result.prefix(90)) } }
         await post(sid, id, result)
@@ -395,6 +484,7 @@ final class DeskModel: ObservableObject {
         case "web_fetch": return "fetching \(r.detail.prefix(50))"
         case "spawn_agent": return "a sub-agent is working"
         case "job_status": return "checking \(r.detail.prefix(40))"
+        case "web_search": return "searching the web"
         default: return "working"
         }
     }

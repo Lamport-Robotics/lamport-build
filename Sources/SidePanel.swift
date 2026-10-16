@@ -44,14 +44,15 @@ struct FilesPane: View {
                     ForEach(desk.tree) { n in
                         HStack(spacing: 6) {
                             if n.depth > 0 { Text(n.isLast ? "└─" : "├─").foregroundStyle(Color(hex: 0x4d4d4d)) }
-                            Text(n.path.split(separator: "/").last.map(String.init) ?? n.path).foregroundStyle(desk.selected == n.path ? Theme.ink : Color(hex: 0xa6a6a6)).lineLimit(1)
+                            if n.isDir { Image(systemName: n.open ? "chevron.down" : "chevron.right").font(.system(size: 8, weight: .bold)).foregroundStyle(Color(hex: 0x6a6a6a)).frame(width: 8) }
+                            Text(n.path.split(separator: "/").last.map(String.init) ?? n.path).foregroundStyle(n.isDir ? Color(hex: 0xc9c9c9) : desk.selected == n.path ? Theme.ink : Color(hex: 0xa6a6a6)).lineLimit(1)
                             Spacer(minLength: 0)
                         }
-                        .font(Theme.mono(10.5))
-                        .padding(.leading, 8 + CGFloat(n.depth) * 14).padding(.trailing, 8).padding(.vertical, 6)
+                        .font(Theme.mono(10.5, n.isDir ? .semibold : .regular))
+                        .padding(.leading, 8 + CGFloat(n.depth) * 14).padding(.trailing, 8).padding(.vertical, 5)
                         .background(desk.selected == n.path ? Color(hex: 0x323232) : .clear)
                         .contentShape(Rectangle())
-                        .onTapGesture { desk.selected = n.path }
+                        .onTapGesture { if n.isDir { desk.toggle(n.path) } else { desk.select(n.path) } }
                         .help(n.path)
                     }
                 }
@@ -59,7 +60,7 @@ struct FilesPane: View {
             .frame(width: 160)
             .background(Color(hex: 0x1d1d1d))
             VStack(alignment: .leading, spacing: 0) {
-                if let s = desk.selected, let body = desk.files[s] {
+                if let s = desk.selected, let body = desk.content(s) {
                     HStack {
                         Text(s).font(Theme.mono(10)).foregroundStyle(Color(hex: 0xa0a0a0)).lineLimit(1).truncationMode(.middle)
                         Spacer()
@@ -97,12 +98,14 @@ struct CodeEditor: NSViewRepresentable {
         scroll.hasVerticalRuler = true; scroll.rulersVisible = true
         let ruler = LineGutter(scrollView: scroll, orientation: .verticalRuler); ruler.clientView = tv; scroll.verticalRulerView = ruler
         tv.string = text; context.coordinator.path = path
+        Highlighter.apply(tv.textStorage!, ext: (path as NSString).pathExtension.lowercased())
         return scroll
     }
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let tv = scroll.documentView as! NSTextView
-        if context.coordinator.path != path { context.coordinator.path = path; tv.string = text; tv.scrollToBeginningOfDocument(nil); scroll.verticalRulerView?.needsDisplay = true; return }
-        if tv.string != text && !context.coordinator.editing { tv.string = text; scroll.verticalRulerView?.needsDisplay = true }
+        let ext = (path as NSString).pathExtension.lowercased()
+        if context.coordinator.path != path { context.coordinator.path = path; tv.string = text; Highlighter.apply(tv.textStorage!, ext: ext); tv.scrollToBeginningOfDocument(nil); scroll.verticalRulerView?.needsDisplay = true; return }
+        if tv.string != text && !context.coordinator.editing { tv.string = text; Highlighter.apply(tv.textStorage!, ext: ext); scroll.verticalRulerView?.needsDisplay = true }
     }
     final class Coord: NSObject, NSTextViewDelegate {
         var parent: CodeEditor; var path = ""; var editing = false; var pending: DispatchWorkItem?
@@ -110,7 +113,8 @@ struct CodeEditor: NSViewRepresentable {
         func textDidChange(_ n: Notification) {
             guard let tv = n.object as? NSTextView else { return }
             editing = true; let s = tv.string; pending?.cancel()
-            let w = DispatchWorkItem { [weak self] in self?.parent.text = s; self?.editing = false }
+            let ext = (path as NSString).pathExtension.lowercased()
+            let w = DispatchWorkItem { [weak self] in self?.parent.text = s; self?.editing = false; if let ts = tv.textStorage { let sel = tv.selectedRanges; Highlighter.apply(ts, ext: ext); tv.selectedRanges = sel } }
             pending = w; DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: w)
             tv.enclosingScrollView?.verticalRulerView?.needsDisplay = true
         }
@@ -214,8 +218,28 @@ struct PreviewPane: View {
                         .onChange(of: rt.log.count) { _, _ in proxy.scrollTo("tail") }
                     }
                     .frame(height: 160).background(Color.black.opacity(0.4)).padding(.top, 10)
+                    ShellInput()
                 }
             }
         }
+    }
+}
+
+/// a command line into the project folder, under the terminal output
+struct ShellInput: View {
+    @EnvironmentObject var desk: DeskModel
+    @State private var cmd = ""
+    @State private var history: [String] = []
+    @State private var cursor = 0
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("$").font(Theme.mono(11, .semibold)).foregroundStyle(Theme.green)
+            TextField("", text: $cmd, prompt: Text(desk.shellBusy ? "running…" : "run a command in \(desk.folderName ?? "the folder")").foregroundStyle(Color(hex: 0x5a5a5a)))
+                .textFieldStyle(.plain).font(Theme.mono(11)).foregroundStyle(Color(hex: 0xdcdcdc)).disabled(desk.shellBusy)
+                .onSubmit { let c = cmd.trimmingCharacters(in: .whitespaces); guard !c.isEmpty else { return }; history.append(c); cursor = history.count; desk.runShell(c); cmd = "" }
+                .onKeyPress(.upArrow) { guard cursor > 0 else { return .ignored }; cursor -= 1; cmd = history[cursor]; return .handled }
+                .onKeyPress(.downArrow) { guard cursor < history.count else { return .ignored }; cursor += 1; cmd = cursor < history.count ? history[cursor] : ""; return .handled }
+        }
+        .padding(.horizontal, 12).frame(height: 32).background(Color.black.opacity(0.55))
     }
 }

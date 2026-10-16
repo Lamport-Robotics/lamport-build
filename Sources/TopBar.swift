@@ -36,6 +36,9 @@ struct TopBar: View {
                 }.buttonStyle(Quiet()).help(f.path)
             }
             Spacer()
+            if let u = desk.update {
+                Button { NSWorkspace.shared.open(u.url) } label: { HStack(spacing: 7) { Image(systemName: "arrow.down.circle").font(.system(size: 12, weight: .medium)); Text("Update to \(u.version)") }.font(Theme.sans(12, .medium)).foregroundStyle(Color(hex: 0xd8d8d8)).padding(.horizontal, 13).frame(height: 32).background(Capsule().fill(Color.white.opacity(0.07))).overlay(Capsule().strokeBorder(Color.white.opacity(0.12))) }.buttonStyle(Quiet()).help(u.notes)
+            }
             Button { NSWorkspace.shared.open(API.siteURL("/app")) } label: { Image(systemName: "globe").font(.system(size: 15)).circle43() }.buttonStyle(Quiet()).help("Open the workspace on lamport.si")
             if desk.folder != nil && desk.canPreview {
                 Button { desk.sideTab = 1; if !desk.isStatic { Task { await desk.startRun("installing and starting the project") } } } label: {

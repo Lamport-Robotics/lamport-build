@@ -55,9 +55,31 @@ struct AssistantTurn: View {
                     Text(desk.doing()).font(Theme.mono(11)).foregroundStyle(Color(hex: 0x9a9a9a))
                 }.padding(.top, 2)
             } else if last {
-                HStack(spacing: 8) {
-                    Text("■").font(Theme.mono(9)).foregroundStyle(Theme.green)
-                    Text("done" + (writes > 0 ? " · \(writes) file\(writes > 1 ? "s" : "")" : "")).font(Theme.mono(11)).foregroundStyle(Color(hex: 0x8c8c8c))
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Text("■").font(Theme.mono(9)).foregroundStyle(Theme.green)
+                        Text("done" + (desk.changes.isEmpty ? "" : " · \(desk.changes.count) file\(desk.changes.count > 1 ? "s" : "") changed")).font(Theme.mono(11)).foregroundStyle(Color(hex: 0x8c8c8c))
+                        Spacer()
+                        if desk.canUndo { Button { desk.undoLastTurn() } label: { HStack(spacing: 5) { Image(systemName: "arrow.uturn.backward").font(.system(size: 9, weight: .semibold)); Text("undo turn") }.font(Theme.mono(10.5)).foregroundStyle(Color(hex: 0x9a9a9a)).padding(.horizontal, 9).frame(height: 24).background(Capsule().fill(Color.white.opacity(0.05))).overlay(Capsule().strokeBorder(Color.white.opacity(0.07))) }.buttonStyle(Quiet()).help("Put the files back the way they were before this turn (⇧⌘Z)") }
+                    }
+                    if !desk.changes.isEmpty {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(desk.changes.prefix(12), id: \.path) { c in
+                                Button { if desk.has(c.path) { desk.select(c.path); desk.sideTab = 0 } } label: {
+                                    HStack(spacing: 10) {
+                                        Text(c.before == nil ? "A" : c.after == nil ? "D" : "M").font(Theme.mono(10, .bold)).foregroundStyle(c.before == nil ? Theme.add : c.after == nil ? Theme.red : Theme.amber).frame(width: 10)
+                                        Text(c.path).font(Theme.mono(11)).foregroundStyle(Color(hex: 0xc0c0c0)).lineLimit(1).truncationMode(.middle)
+                                        Spacer()
+                                        if let b = c.before, let a = c.after { Text(a >= b ? "+\(a - b)" : "−\(b - a)").font(Theme.mono(10)).foregroundStyle(a >= b ? Theme.add : Theme.red) } else if let a = c.after { Text("\(a) lines").font(Theme.mono(10)).foregroundStyle(Color(hex: 0x7a7a7a)) }
+                                    }.contentShape(Rectangle())
+                                }.buttonStyle(Quiet())
+                            }
+                            if desk.changes.count > 12 { Text("… \(desk.changes.count - 12) more").font(Theme.mono(10)).foregroundStyle(Color(hex: 0x6a6a6a)) }
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.white.opacity(0.02)))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.white.opacity(0.05)))
+                    }
                 }.padding(.top, 2)
             }
         }
@@ -158,7 +180,7 @@ struct ToolRowView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Text(mark.0).foregroundStyle(mark.1)
-                Text(row.name == "web_fetch" ? "Fetch" : row.name == "spawn_agent" ? "Delegate" : row.name == "job_status" ? "Job" : row.name == "job_stop" ? "Stop job" : row.label).foregroundStyle(Color(hex: 0xd0d0d0))
+                Text(row.name == "web_fetch" ? "Fetch" : row.name == "web_search" ? "Search web" : row.name == "spawn_agent" ? "Delegate" : row.name == "job_status" ? "Job" : row.name == "job_stop" ? "Stop job" : row.label).foregroundStyle(Color(hex: 0xd0d0d0))
                 Text(row.detail).foregroundStyle(Color(hex: 0x9a9a9a)).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 if let n = row.note { Text(n).foregroundStyle(Color(hex: 0x6a6a6a)) }
@@ -200,7 +222,7 @@ struct ToolRowView: View {
         .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.white.opacity(0.025)))
         .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color.white.opacity(0.04)))
         .contentShape(Rectangle())
-        .onTapGesture { let f = row.detail.replacingOccurrences(of: #":\d+$"#, with: "", options: .regularExpression); if row.name.hasSuffix("file"), desk.files[f] != nil { desk.selected = f; desk.sideTab = 0 } }
+        .onTapGesture { let f = row.detail.replacingOccurrences(of: #":\d+$"#, with: "", options: .regularExpression); if row.name.hasSuffix("file"), desk.has(f) { desk.select(f); desk.sideTab = 0 } }
     }
 }
 struct DiffLine: View {
