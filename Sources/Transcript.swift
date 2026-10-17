@@ -7,7 +7,7 @@ struct Transcript: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     ForEach(Array(desk.turns.enumerated()), id: \.element.id) { i, t in
-                        if t.role == .user { UserBubble(text: t.text) } else { AssistantTurn(turn: t, last: i == desk.turns.count - 1) }
+                        if t.role == .user { if t.auto { AutoNote(text: t.text) } else { UserBubble(text: t.text) } } else { AssistantTurn(turn: t, last: i == desk.turns.count - 1) }
                     }
                     Color.clear.frame(height: 1).id("end")
                 }
@@ -239,5 +239,21 @@ struct Cursor: View {
     var body: some View {
         Rectangle().fill(Theme.green).frame(width: 7, height: 12).opacity(on ? 1 : 0.15)
             .onAppear { withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) { on.toggle() } }
+    }
+}
+
+/// the desk's own prompt after a failed run, folded so it reads as a note rather than a message
+struct AutoNote: View {
+    var text: String
+    @State private var open = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button { open.toggle() } label: {
+                HStack(spacing: 8) { Text("↻").foregroundStyle(Theme.amber); Text("the run failed, handed to the agent"); Image(systemName: open ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .semibold)) }
+                    .font(Theme.mono(11)).foregroundStyle(Color(hex: 0x8c8c8c)).padding(.horizontal, 12).padding(.vertical, 6)
+                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), style: StrokeStyle(lineWidth: 1, dash: [3, 3])))
+            }.buttonStyle(Quiet())
+            if open { Text(text).font(Theme.mono(11)).foregroundStyle(Color(hex: 0x9a9a9a)).lineSpacing(2).textSelection(.enabled).padding(10).frame(maxWidth: .infinity, alignment: .leading).background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.35))).overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.white.opacity(0.06))) }
+        }
     }
 }

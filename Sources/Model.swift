@@ -47,6 +47,7 @@ struct Turn: Identifiable {
     var text = ""
     var parts: [Part] = []
     var pending = false
+    var auto = false      // the desk handing a failed run back to the agent, not something the member typed
     var at = Date()
 }
 struct FileNode: Identifiable { var id: String { path }; var path: String; var depth: Int; var isLast: Bool; var isDir = false; var open = true }
@@ -280,7 +281,7 @@ final class DeskModel: ObservableObject {
         let q = slash?.prompt.map { rest.isEmpty ? $0 : "\($0)\n\n\(rest)" } ?? q0
         if !auto { autoFixes = 0 }
         prompt = ""; busy = true; originals = [:]; changes = []
-        turns.append(Turn(role: .user, text: slash != nil ? q0 : q)); turns.append(Turn(role: .assistant, pending: true))
+        turns.append(Turn(role: .user, text: slash != nil ? q0 : q, auto: auto)); turns.append(Turn(role: .assistant, pending: true))
         let notes = ["LAMPORT.md", "CLAUDE.md", "AGENTS.md"].compactMap { files[$0] }.first
         var body: [String: Any] = ["kind": kind, "model": model, "prompt": q, "root": folder.path, "name": folder.lastPathComponent]
         if let projectId { body["projectId"] = projectId }
