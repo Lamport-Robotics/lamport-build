@@ -8,7 +8,18 @@ final class Engine: ObservableObject {
     @Published private(set) var state: State = .starting
 
     /// the names the bundled engine expects on the wire; they travel with the binary in engine.json
-    struct Wire: Decodable { let user: String; let passwordEnv: String; let ticketHeader: String }
+    struct Wire: Decodable {
+        let user: String; let passwordEnv: String; let ticketHeader: String
+        /// the engine's own env vars start with this; any the user's shell set are dropped so only the app configures it
+        let envPrefix: String?
+        /// the engine's global config file, relative to its config home
+        let configFile: String?
+    }
+
+    /// settings the app owns in the engine's config: no update checks (the app ships the engine) and no session sharing
+    static let pinnedConfig: [String: Any] = ["update": "disable", "share": "disabled"]
+    /// env the engine starts with on top of the user's, for the same reasons, plus no fetch of a model catalog from upstream
+    static let pinnedEnv = ["DISABLE_AUTOUPDATE": "1", "DISABLE_MODELS_FETCH": "1"]
     struct Failure: LocalizedError { let message: String; var errorDescription: String? { message } }
 
     private(set) var base = URL(string: "http://127.0.0.1")!
@@ -43,13 +54,18 @@ final class Engine: ObservableObject {
         let p = Process()
         p.executableURL = dir.appendingPathComponent("lamport-engine")
         p.arguments = ["serve", "--hostname", "127.0.0.1", "--port", String(port)]
-        var env = ProcessInfo.processInfo.environment
+        // nothing from the user's shell may point the engine's traces somewhere or override what the app sets
+        var env = ProcessInfo.processInfo.environment.filter { key, _ in
+            !key.hasPrefix("OTEL_") && !(wire.envPrefix.map { key.hasPrefix($0) } ?? false)
+        }
+        if let prefix = wire.envPrefix { for (k, v) in Engine.pinnedEnv { env[prefix + k] = v } }
         env[wire.passwordEnv] = password
         for (key, sub) in [("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache")] {
             let u = Engine.home.appendingPathComponent(sub, isDirectory: true)
             try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
             env[key] = u.path
         }
+        if let file = wire.configFile { Engine.pinConfig(at: Engine.home.appendingPathComponent("config/" + file)) }
         p.environment = env
         p.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         let out = Pipe()
@@ -177,6 +193,24 @@ final class Engine: ObservableObject {
     }
 
     // MARK: helpers
+
+    /// write the app-owned keys into the engine's config, keeping anything else already in it
+    static func pinConfig(at url: URL) {
+        let old = try? Data(contentsOf: url)
+        let parsed = old.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        var config = parsed ?? [:]
+        if let old, parsed == nil {
+            // not plain JSON (comments, a broken edit): set it aside rather than lose it
+            try? old.write(to: url.appendingPathExtension("bak"), options: .atomic)
+            Log.write("engine config was not plain JSON; kept a copy at \(url.lastPathComponent).bak")
+        }
+        let before = NSDictionary(dictionary: config)
+        config.merge(pinnedConfig) { _, pinned in pinned }
+        guard old == nil || !before.isEqual(to: config),
+              let data = try? JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+    }
 
     /// a port nothing on this Mac is listening on right now
     static func freePort() -> Int {

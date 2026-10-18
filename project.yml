@@ -19,8 +19,13 @@ targets:
   LamportBuild:
     type: application
     platform: macOS
-    sources: [Sources]
-    resources: [Resources]
+    sources:
+      - Sources
+      # asset catalog and THIRD_PARTY_NOTICES (the bundled engine's licenses) go to Contents/Resources
+      - path: Resources
+        excludes: [THIRD_PARTY_NOTICES]
+      - path: Resources/THIRD_PARTY_NOTICES
+        buildPhase: resources
     dependencies:
       - package: SwiftTerm
     postBuildScripts:
