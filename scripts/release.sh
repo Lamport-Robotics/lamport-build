@@ -1,19 +1,37 @@
 #!/usr/bin/env bash
-# builds Lamport Build for release and packs a dmg. ad-hoc signed unless a Developer ID is given:
-#   SIGN_ID="Developer ID Application: Lamport Robotics (TEAMID)" APPLE_ID=… APPLE_TEAM_ID=… APPLE_PASSWORD=… scripts/release.sh
-# the apple password is an app-specific password; keep these in a local env file, never in the repo.
+# builds Lamport Build for release, packs a zip (for the install script) and a dmg. signing, best first:
+#   Developer ID:  SIGN_ID="Developer ID Application: Lamport Robotics (TEAMID)" APPLE_ID=… APPLE_TEAM_ID=… APPLE_PASSWORD=… scripts/release.sh
+#   own identity:  SIGNING_ENV=/path/to/signing.env scripts/release.sh   (KEYCHAIN, KEYCHAIN_PASSWORD, SIGN_IDENTITY)
+#   neither:       ad-hoc
+# a stable identity keeps keychain access across updates; ad-hoc asks again after every build.
+# keep these files and passwords out of the repo.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 xcodegen generate >/dev/null
 xcodebuild -project LamportBuild.xcodeproj -scheme LamportBuild -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO build | grep -E "error:|\*\* BUILD" || true
 APP="build/Build/Products/Release/Lamport Build.app"
+ENGINE="$APP/Contents/Resources/engine/lamport-engine"
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP/Contents/Info.plist")
+# inside out: the engine binary first, then the app around it
 if [ -n "${SIGN_ID:-}" ]; then
-  codesign --force --deep --options runtime --timestamp --sign "$SIGN_ID" "$APP"
+  [ -f "$ENGINE" ] && codesign --force --options runtime --timestamp --entitlements scripts/engine.entitlements --sign "$SIGN_ID" "$ENGINE"
+  codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP"
+elif [ -n "${SIGNING_ENV:-}" ]; then
+  set -a; . "$SIGNING_ENV"; set +a
+  security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+  # codesign only finds identities in keychains on the search list, so ours joins it just while signing
+  OLD=(); while IFS= read -r k; do k="${k//\"/}"; OLD+=("${k#"${k%%[![:space:]]*}"}"); done < <(security list-keychains -d user)
+  trap 'security list-keychains -d user -s "${OLD[@]}"' EXIT
+  security list-keychains -d user -s "${OLD[@]}" "$KEYCHAIN"
+  [ -f "$ENGINE" ] && codesign --force --keychain "$KEYCHAIN" --sign "$SIGN_IDENTITY" "$ENGINE"
+  codesign --force --keychain "$KEYCHAIN" --sign "$SIGN_IDENTITY" "$APP"
+  security list-keychains -d user -s "${OLD[@]}"; trap - EXIT
 else
   codesign --force --deep --sign - "$APP"
 fi
 codesign --verify --strict --verbose=1 "$APP"
+ZIP="build/Lamport Build $VERSION.zip"; rm -f "$ZIP"
+ditto -c -k --keepParent "$APP" "$ZIP"
 OUT="build/Lamport Build $VERSION.dmg"; rm -f "$OUT"
 STAGE=$(mktemp -d); cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
 mkdir "$STAGE/.background"; cp scripts/dmg/background.tiff "$STAGE/.background/background.tiff"
@@ -53,4 +71,4 @@ if [ -n "${SIGN_ID:-}" ]; then
     xcrun stapler staple "$OUT"
   fi
 fi
-ls -la "$OUT"
+ls -la "$OUT" "$ZIP"
