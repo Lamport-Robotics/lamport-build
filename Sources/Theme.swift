@@ -10,6 +10,7 @@ enum Theme {
     static let selected = Color.white.opacity(0.085)
     static let line = Color.white.opacity(0.07)
     static let line2 = Color.white.opacity(0.12)
+    static let cream = Color(hex: 0xf5efe2)    // the logo's ink
     static let ink = Color(hex: 0xececec)
     static let ink2 = Color(hex: 0xbdbdbd)
     static let mute = Color(hex: 0x8a8a8a)

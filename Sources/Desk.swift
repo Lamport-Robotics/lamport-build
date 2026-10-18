@@ -84,7 +84,7 @@ struct Sidebar: View {
     @EnvironmentObject var store: Store
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Color.clear.frame(height: 40)
+            Brand().frame(height: 40).padding(.leading, 80)
             VStack(spacing: 2) {
                 Button { store.newSession() } label: {
                     Row(icon: "square.and.pencil", title: "New session", hint: "⌘N")
@@ -109,7 +109,7 @@ struct Sidebar: View {
             }
 
             Rectangle().fill(Theme.line).frame(height: 1)
-            Account().padding(.horizontal, 8).padding(.top, 8)
+            Account().padding(.horizontal, 8).padding(.top, 10)
             HStack(spacing: 4) {
                 Button { store.pickFolder() } label: { Row(icon: "folder.badge.plus", title: "Open folder…", hint: "⌘O") }.buttonStyle(Flat(pad: 8))
                 SettingsLink { Image(systemName: "gearshape").font(.system(size: 12.5)).foregroundStyle(Theme.mute).frame(width: 28, height: 28) }.buttonStyle(Flat(pad: 0))
@@ -123,31 +123,123 @@ struct Sidebar: View {
 /// who the app is signed in as, and today's allowance; signed out, the way in
 struct Account: View {
     @EnvironmentObject var store: Store
+    @State private var open = false
     var body: some View {
         if store.signedIn {
-            Menu {
-                if let u = store.usage { Text(u.pro ? "Pro" : "Free plan") ; Text("\(u.turnsLeft) of \(u.turnLimit) turns left today") }
-                Divider()
-                Button("Sign Out") { store.signOut() }
-            } label: {
+            Button { open.toggle() } label: {
                 HStack(spacing: 9) {
-                    Text(String((store.who ?? "L").prefix(1)).uppercased()).font(Theme.sans(10.5, .semibold)).foregroundStyle(Theme.ink)
-                        .frame(width: 20, height: 20).background(Circle().fill(Theme.raised)).overlay(Circle().strokeBorder(Theme.line2))
-                    Text(store.who ?? "Signed in").font(Theme.sans(12.5)).foregroundStyle(Theme.ink2).lineLimit(1).truncationMode(.middle)
+                    Avatar(who: store.who, size: 24)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(store.who ?? "Lamport member").font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink).lineLimit(1).truncationMode(.middle)
+                        Text(store.usage.map { $0.pro ? "Pro" : "Free · \($0.turnsLeft) turns left" } ?? "Signed in").font(Theme.sans(11)).foregroundStyle(Theme.mute).lineLimit(1)
+                    }
                     Spacer(minLength: 4)
-                    if let u = store.usage { Text(u.pro ? "Pro" : "\(u.turnsLeft) left").font(Theme.sans(11)).foregroundStyle(Theme.dim) }
+                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.dim)
                 }
-                .padding(.horizontal, 8).frame(height: 30).contentShape(Rectangle())
+                .padding(.horizontal, 8).frame(height: 40)
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(open ? Theme.selected : .clear))
+                .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize(horizontal: false, vertical: true)
+            .buttonStyle(Quiet())
+            .popover(isPresented: $open, arrowEdge: .top) { AccountCard(close: { open = false }).environmentObject(store) }
+            .task { await store.refreshUsage() }
         } else {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Sign in to use Lamport's models. Free members get a daily allowance.")
+                    .font(Theme.sans(11.5)).foregroundStyle(Theme.mute).fixedSize(horizontal: false, vertical: true)
                 Button { store.signingIn ? store.cancelSignIn() : store.signIn() } label: {
-                    Row(icon: "person.crop.circle", title: store.signingIn ? "Waiting for the browser…" : "Sign in", hint: store.signingIn ? "Cancel" : nil)
-                }.buttonStyle(Flat(pad: 8))
-                if let e = store.authError { Text(e).font(Theme.sans(11)).foregroundStyle(Theme.red).padding(.horizontal, 8).fixedSize(horizontal: false, vertical: true) }
+                    HStack(spacing: 7) {
+                        if store.signingIn { ProgressView().controlSize(.mini) } else { Image("Mark").resizable().renderingMode(.template).scaledToFit().frame(height: 11) }
+                        Text(store.signingIn ? "Waiting for the browser… Cancel" : "Sign in with Lamport")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(Primary())
+                if let e = store.authError { Text(e).font(Theme.sans(11)).foregroundStyle(Theme.red).fixedSize(horizontal: false, vertical: true) }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.raised))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.line))
+        }
+    }
+}
+
+/// the member's initial in the brand's cream
+struct Avatar: View {
+    var who: String?; var size: CGFloat
+    var body: some View {
+        Text(String((who ?? "L").prefix(1)).uppercased())
+            .font(Theme.sans(size * 0.46, .semibold)).foregroundStyle(Color(hex: 0x141414))
+            .frame(width: size, height: size)
+            .background(Circle().fill(Theme.cream))
+    }
+}
+
+/// the account, opened from the sidebar: plan, today's use, the way out
+struct AccountCard: View {
+    @EnvironmentObject var store: Store
+    var close: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 11) {
+                Avatar(who: store.who, size: 34)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(store.who ?? "Lamport member").font(Theme.sans(13, .medium)).foregroundStyle(Theme.ink).lineLimit(1).truncationMode(.middle)
+                    Text(store.usage.map { $0.pro ? "Pro plan" : "Free plan" } ?? "Lamport account").font(Theme.sans(11.5)).foregroundStyle(Theme.mute)
+                }
+                Spacer()
+                if let u = store.usage {
+                    Text(u.pro ? "PRO" : "FREE").font(Theme.sans(9.5, .bold)).tracking(0.8)
+                        .foregroundStyle(u.pro ? Color(hex: 0x141414) : Theme.ink2)
+                        .padding(.horizontal, 7).frame(height: 18)
+                        .background(Capsule().fill(u.pro ? Theme.cream : Color.white.opacity(0.08)))
+                }
+            }
+            if let u = store.usage {
+                VStack(alignment: .leading, spacing: 10) {
+                    Meter(title: "Turns today", used: u.turns, limit: u.turnLimit, label: "\(u.turns) of \(u.turnLimit)")
+                    Meter(title: "Tokens today", used: u.tokens, limit: u.tokenLimit, label: "\(Store.tokens(u.tokens)) of \(Store.tokens(u.tokenLimit))")
+                }
+            } else {
+                Text("Today's usage shows up here once lamport.si reports it.").font(Theme.sans(11.5)).foregroundStyle(Theme.dim)
+            }
+            Rectangle().fill(Theme.line).frame(height: 1)
+            VStack(spacing: 2) {
+                Button { NSWorkspace.shared.open(API.siteURL("/app")); close() } label: { Row(icon: "arrow.up.right.square", title: "Open lamport.si") }.buttonStyle(Flat(pad: 7))
+                SettingsLink { Row(icon: "gearshape", title: "Settings…", hint: "⌘,") }.buttonStyle(Flat(pad: 7))
+                Button { close(); store.signOut() } label: { Row(icon: "rectangle.portrait.and.arrow.right", title: "Sign out") }.buttonStyle(Flat(pad: 7))
             }
         }
+        .padding(16)
+        .frame(width: 290)
+        .background(Theme.raised)
+    }
+}
+
+struct Meter: View {
+    var title: String; var used: Int; var limit: Int; var label: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack { Text(title).foregroundStyle(Theme.mute); Spacer(); Text(label).foregroundStyle(Theme.ink2) }.font(Theme.sans(11.5))
+            GeometryReader { g in
+                let f = limit > 0 ? min(1, CGFloat(used) / CGFloat(limit)) : 0
+                Capsule().fill(Color.white.opacity(0.08))
+                    .overlay(alignment: .leading) { Capsule().fill(f > 0.9 ? Theme.amber : Theme.cream).frame(width: max(4, g.size.width * f)) }
+            }
+            .frame(height: 4)
+        }
+    }
+}
+
+/// the mark and the name, set in the title bar beside the traffic lights
+struct Brand: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            Image("Mark").resizable().interpolation(.high).scaledToFit().frame(height: 18)
+            (Text("Lamport").foregroundStyle(Theme.ink) + Text(" Build").foregroundStyle(Theme.mute)).font(Theme.sans(13, .semibold))
+            Spacer()
+        }
+        .padding(.top, 2)
     }
 }
 

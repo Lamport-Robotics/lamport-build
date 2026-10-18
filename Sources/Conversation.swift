@@ -77,12 +77,14 @@ struct Blank: View {
             Spacer()
             if store.projects.isEmpty {
                 VStack(spacing: 14) {
+                    Image("Mark").resizable().interpolation(.high).scaledToFit().frame(height: 38).opacity(0.9)
                     Text("Open a folder to begin").font(Theme.sans(22, .medium)).foregroundStyle(Theme.ink)
                     Text("Lamport Build reads, edits and runs the code in a folder on this Mac. Nothing leaves it except what the model needs to see.")
                         .font(Theme.sans(13)).foregroundStyle(Theme.mute).multilineTextAlignment(.center).frame(maxWidth: 420)
                     Button("Open folder…") { store.pickFolder() }.buttonStyle(Primary()).padding(.top, 6)
                 }
             } else {
+                Image("Mark").resizable().interpolation(.high).scaledToFit().frame(height: 38).opacity(0.9).padding(.bottom, 2)
                 Text("What should we work on?").font(Theme.sans(22, .medium)).foregroundStyle(Theme.ink)
                 VStack(alignment: .leading, spacing: 8) {
                     FolderPicker()
