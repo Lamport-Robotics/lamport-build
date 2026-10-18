@@ -88,8 +88,12 @@ struct ModelChoice: Identifiable, Hashable {
     let id: String
     let providerID: String
     let name: String
+    /// shown but not usable on this plan (Lamport SI without Pro)
+    var locked = false
     var key: String { providerID + "/" + id }
     var isLamport: Bool { providerID == Store.provider }
+    /// models served by something running on this Mac
+    var isLocal: Bool { Store.localProviders.contains(providerID) }
 }
 
 /// today's allowance on lamport.si, as the proxy counts it
@@ -205,13 +209,13 @@ final class Store: ObservableObject {
             guard let id = $0["id"] as? String, let p = $0["providerID"] as? String else { return nil }
             return ModelChoice(id: id, providerID: p, name: $0["name"] as? String ?? id)
         }
-        // lamport's own models lead the picker; they only exist while the app is signed in
-        models = models.filter(\.isLamport) + models.filter { !$0.isLamport }
-        // a model you picked yourself sticks; otherwise follow the engine's default, which moves as models come and go
-        if let saved = UserDefaults.standard.string(forKey: "model"), let m = models.first(where: { $0.key == saved }) { model = m; return }
-        if let d = try? await engine.data("/api/model/default") as? [String: Any], let id = d["id"] as? String, let p = d["providerID"] as? String {
-            model = models.first { $0.id == id && $0.providerID == p } ?? ModelChoice(id: id, providerID: p, name: d["name"] as? String ?? id)
-        } else { model = nil }
+        // the picker offers lamport's models (they exist only while signed in) and models running on this Mac;
+        // anything else the engine knows about stays out of sight
+        let lamport = models.filter(\.isLamport)
+        models = lamport + lockedLamport(besides: lamport) + models.filter(\.isLocal)
+        // a model you picked yourself sticks; otherwise lamport's first, else the first local one
+        if let saved = UserDefaults.standard.string(forKey: "model"), let m = models.first(where: { $0.key == saved && !$0.locked }) { model = m; return }
+        model = lamport.first ?? models.first { $0.isLocal }
         Log.write("model \(model?.key ?? "engine default") of \(models.count)")
     }
 
@@ -377,6 +381,17 @@ final class Store: ObservableObject {
     // MARK: the lamport account
 
     nonisolated static let provider = "lamport"
+    nonisolated static let localProviders: Set<String> = ["ollama", "lmstudio", "llama.cpp", "llamacpp"]
+
+    /// lamport models the plan doesn't include, from the list lamport.si last sent, so the picker can say they exist
+    private func lockedLamport(besides open: [ModelChoice]) -> [ModelChoice] {
+        guard signedIn, let d = UserDefaults.standard.data(forKey: "lamportModels"),
+              let list = (try? JSONSerialization.jsonObject(with: d)) as? [[String: Any]] else { return [] }
+        return list.compactMap { m in
+            guard (m["available"] as? Bool) == false, let id = m["id"] as? String, !open.contains(where: { $0.id == id }) else { return nil }
+            return ModelChoice(id: id, providerID: Store.provider, name: m["name"] as? String ?? id, locked: true)
+        }
+    }
 
     /// device login: lamport.si hands out a code, the member approves it in the browser, the app collects its own token
     func signIn() {

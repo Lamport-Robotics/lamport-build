@@ -364,7 +364,22 @@ struct Composer: View {
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Permissions  ⇧⌘1–4")
                 Menu {
-                    ForEach(store.models) { m in Button { store.choose(m) } label: { if m == store.model { Label(m.name, systemImage: "checkmark") } else { Text(m.name) } } }
+                    let lamport = store.models.filter(\.isLamport), local = store.models.filter(\.isLocal)
+                    if !lamport.isEmpty {
+                        Section("Lamport") {
+                            ForEach(lamport) { m in
+                                if m.locked { Button("\(m.name)  ·  Pro") {}.disabled(true) }
+                                else { Button { store.choose(m) } label: { if m == store.model { Label(m.name, systemImage: "checkmark") } else { Text(m.name) } } }
+                            }
+                        }
+                    } else if !store.signedIn {
+                        Button("Sign in to use Lamport's models") { store.signIn() }
+                    }
+                    if !local.isEmpty {
+                        Section("On this Mac") {
+                            ForEach(local) { m in Button { store.choose(m) } label: { if m == store.model { Label(m.name, systemImage: "checkmark") } else { Text(m.name) } } }
+                        }
+                    }
                 } label: {
                     HStack(spacing: 4) { Text(store.model?.name ?? "Model"); Image(systemName: "chevron.down").font(.system(size: 7.5, weight: .semibold)) }
                         .font(Theme.sans(12)).foregroundStyle(Theme.mute)
