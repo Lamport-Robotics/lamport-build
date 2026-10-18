@@ -1,4 +1,4 @@
-// app icon from the logo: swift scripts/icon.swift <logo.jpg> <appiconset dir>
+// app icon and the in-app mark from the logo: swift scripts/icon.swift <logo.jpg> <appiconset dir> [mark imageset dir]
 // the mark is cropped from the logo's black square and set on a macOS squircle at every size the asset catalog wants
 import AppKit
 
@@ -58,5 +58,21 @@ func render(_ px: Int) -> Data {
 
 for px in [16, 32, 64, 128, 256, 512, 1024] {
     try! render(px).write(to: outDir.appendingPathComponent("icon_\(px).png"))
+}
+/// the bare mark in the logo's cream on transparent, for the sidebar and the empty state
+func renderMark(height: Int) -> Data {
+    let w = Int((CGFloat(height) * CGFloat(mark.width) / CGFloat(mark.height)).rounded(.up))
+    let ctx = CGContext(data: nil, width: w, height: height, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    ctx.interpolationQuality = .high
+    let r = CGRect(x: 0, y: 0, width: w, height: height)
+    ctx.clip(to: r, mask: mark); ctx.setFillColor(ink); ctx.fill(r)
+    return NSBitmapImageRep(cgImage: ctx.makeImage()!).representation(using: .png, properties: [:])!
+}
+if args.count > 3 {
+    let dir = URL(fileURLWithPath: args[3])
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    for (scale, name) in [(1, "mark.png"), (2, "mark@2x.png"), (3, "mark@3x.png")] { try! renderMark(height: 64 * scale).write(to: dir.appendingPathComponent(name)) }
+    let json = #"{"images":[{"idiom":"universal","filename":"mark.png","scale":"1x"},{"idiom":"universal","filename":"mark@2x.png","scale":"2x"},{"idiom":"universal","filename":"mark@3x.png","scale":"3x"}],"info":{"author":"xcode","version":1}}"#
+    try! json.write(to: dir.appendingPathComponent("Contents.json"), atomically: true, encoding: .utf8)
 }
 print("mark \(box) -> \(outDir.path)")
