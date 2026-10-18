@@ -109,6 +109,7 @@ struct Sidebar: View {
             }
 
             Rectangle().fill(Theme.line).frame(height: 1)
+            Account().padding(.horizontal, 8).padding(.top, 8)
             HStack(spacing: 4) {
                 Button { store.pickFolder() } label: { Row(icon: "folder.badge.plus", title: "Open folder…", hint: "⌘O") }.buttonStyle(Flat(pad: 8))
                 SettingsLink { Image(systemName: "gearshape").font(.system(size: 12.5)).foregroundStyle(Theme.mute).frame(width: 28, height: 28) }.buttonStyle(Flat(pad: 0))
@@ -116,6 +117,37 @@ struct Sidebar: View {
             .padding(8)
         }
         .background(Theme.bg)
+    }
+}
+
+/// who the app is signed in as, and today's allowance; signed out, the way in
+struct Account: View {
+    @EnvironmentObject var store: Store
+    var body: some View {
+        if store.signedIn {
+            Menu {
+                if let u = store.usage { Text(u.pro ? "Pro" : "Free plan") ; Text("\(u.turnsLeft) of \(u.turnLimit) turns left today") }
+                Divider()
+                Button("Sign Out") { store.signOut() }
+            } label: {
+                HStack(spacing: 9) {
+                    Text(String((store.who ?? "L").prefix(1)).uppercased()).font(Theme.sans(10.5, .semibold)).foregroundStyle(Theme.ink)
+                        .frame(width: 20, height: 20).background(Circle().fill(Theme.raised)).overlay(Circle().strokeBorder(Theme.line2))
+                    Text(store.who ?? "Signed in").font(Theme.sans(12.5)).foregroundStyle(Theme.ink2).lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    if let u = store.usage { Text(u.pro ? "Pro" : "\(u.turnsLeft) left").font(Theme.sans(11)).foregroundStyle(Theme.dim) }
+                }
+                .padding(.horizontal, 8).frame(height: 30).contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize(horizontal: false, vertical: true)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Button { store.signingIn ? store.cancelSignIn() : store.signIn() } label: {
+                    Row(icon: "person.crop.circle", title: store.signingIn ? "Waiting for the browser…" : "Sign in", hint: store.signingIn ? "Cancel" : nil)
+                }.buttonStyle(Flat(pad: 8))
+                if let e = store.authError { Text(e).font(Theme.sans(11)).foregroundStyle(Theme.red).padding(.horizontal, 8).fixedSize(horizontal: false, vertical: true) }
+            }
+        }
     }
 }
 

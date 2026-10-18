@@ -1,10 +1,27 @@
 import SwiftUI
 
-/// preferences: how much the agent may do on its own, and where the engine keeps its data
+/// preferences: the lamport account, how much the agent may do on its own, and where the engine keeps its data
 struct SettingsView: View {
     @EnvironmentObject var store: Store
     var body: some View {
         Form {
+            Section("Account") {
+                if store.signedIn {
+                    LabeledContent("Signed in", value: store.who ?? "Lamport member")
+                    if let u = store.usage {
+                        LabeledContent("Plan", value: u.pro ? "Pro" : "Free")
+                        LabeledContent("Today", value: "\(u.turns) of \(u.turnLimit) turns · \(Store.tokens(u.tokens)) of \(Store.tokens(u.tokenLimit)) tokens")
+                    }
+                    HStack { Text("Models run through lamport.si with this Mac's own key. No provider keys are stored here.").font(.caption).foregroundStyle(.secondary); Spacer(); Button("Sign Out") { store.signOut() } }
+                } else {
+                    HStack {
+                        Text(store.signingIn ? "Waiting for the browser…" : "Sign in to use Lamport's models. Free members get a daily allowance; Lamport SI comes with Pro.").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        if store.signingIn { Button("Cancel") { store.cancelSignIn() } } else { Button("Sign In") { store.signIn() }.keyboardShortcut(.defaultAction) }
+                    }
+                    if let e = store.authError { Text(e).font(.caption).foregroundStyle(Theme.red) }
+                }
+            }
             Section("Agent") {
                 Picker("Default permissions", selection: $store.mode) {
                     ForEach(Mode.allCases) { Text($0.title).tag($0) }
@@ -22,6 +39,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 440)
+        .frame(width: 520, height: 520)
     }
 }

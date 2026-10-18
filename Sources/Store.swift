@@ -89,6 +89,17 @@ struct ModelChoice: Identifiable, Hashable {
     let providerID: String
     let name: String
     var key: String { providerID + "/" + id }
+    var isLamport: Bool { providerID == Store.provider }
+}
+
+/// today's allowance on lamport.si, as the proxy counts it
+struct Usage: Equatable {
+    var pro: Bool
+    var turns: Int
+    var turnLimit: Int
+    var tokens: Int
+    var tokenLimit: Int
+    var turnsLeft: Int { max(0, turnLimit - turns) }
 }
 
 /// how much the agent may do without asking: the same four modes as the Claude Code desktop
@@ -140,6 +151,11 @@ final class Store: ObservableObject {
     @Published var search = ""
     @Published var toast: String?
     @Published var cost: [String: Double] = [:]
+    @Published var signedIn = API.token != nil
+    @Published var signingIn = false
+    @Published var who: String? = UserDefaults.standard.string(forKey: API.whoKey)
+    @Published var authError: String?
+    @Published var usage: Usage?
 
     private var loaded: Set<String> = []
 
@@ -175,6 +191,7 @@ final class Store: ObservableObject {
         await engine.start()
         guard engine.state == .ready else { return }
         Task { await listen() }
+        await connectLamport()
         await loadModels()
         await loadSessions()
         if current == nil, draftProject == nil { draftProject = projects.first?.path }
@@ -188,6 +205,8 @@ final class Store: ObservableObject {
             guard let id = $0["id"] as? String, let p = $0["providerID"] as? String else { return nil }
             return ModelChoice(id: id, providerID: p, name: $0["name"] as? String ?? id)
         }
+        // lamport's own models lead the picker; they only exist while the app is signed in
+        models = models.filter(\.isLamport) + models.filter { !$0.isLamport }
         // a model you picked yourself sticks; otherwise follow the engine's default, which moves as models come and go
         if let saved = UserDefaults.standard.string(forKey: "model"), let m = models.first(where: { $0.key == saved }) { model = m; return }
         if let d = try? await engine.data("/api/model/default") as? [String: Any], let id = d["id"] as? String, let p = d["providerID"] as? String {
@@ -310,6 +329,8 @@ final class Store: ObservableObject {
     func send(_ raw: String) async {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, engine.state == .ready else { return }
+        // models run through lamport.si on the member's own token, so a session starts signed in
+        guard signedIn else { toast("Sign in to start."); signIn(); return }
         var sid = current
         if sid == nil {
             guard let dir = draftProject else { toast("Open a folder first."); return }
@@ -351,6 +372,133 @@ final class Store: ObservableObject {
         guard let id = current else { return }
         _ = try? await engine.call("/api/session/\(id)", method: "PATCH", json: ["permissions": mode.rules])
         _ = try? await engine.call("/api/session/\(id)/agent", method: "POST", json: ["agent": mode.agent])
+    }
+
+    // MARK: the lamport account
+
+    nonisolated static let provider = "lamport"
+
+    /// device login: lamport.si hands out a code, the member approves it in the browser, the app collects its own token
+    func signIn() {
+        guard !signingIn else { return }
+        signingIn = true; authError = nil
+        Task {
+            defer { signingIn = false }
+            do {
+                let start = try await API.call("/api/device/start", method: "POST", json: [:])
+                guard let code = start["code"] as? String else { throw API.HTTPError(status: 0, message: "lamport.si did not hand out a code.") }
+                var comps = URLComponents(url: API.siteURL("/device"), resolvingAgainstBaseURL: false)!
+                comps.queryItems = [URLQueryItem(name: "code", value: code)]
+                NSWorkspace.shared.open(comps.url!)
+                for _ in 0..<300 {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                    guard signingIn else { return }
+                    let r = try await API.call("/api/device/\(code)")
+                    guard let t = r["token"] as? String else { continue }
+                    Keychain.set(t, for: API.tokenKey)
+                    who = (r["who"] as? String)?.nilIfEmpty
+                    UserDefaults.standard.set(who, forKey: API.whoKey)
+                    signedIn = true
+                    // a fresh sign-in starts on lamport's default model; a pick made after this sticks again
+                    UserDefaults.standard.removeObject(forKey: "model")
+                    await connectLamport()
+                    await loadModels()
+                    toast("Signed in\(who.map { " as \($0)" } ?? "")")
+                    NSApp.activate(ignoringOtherApps: true)
+                    return
+                }
+                authError = "The sign-in took too long. Try again."
+            } catch { authError = error.localizedDescription }
+        }
+    }
+    func cancelSignIn() { signingIn = false }
+
+    func signOut(local: Bool = false) {
+        if !local, API.token != nil { let r = API.request("/api/device/signout", method: "POST", json: [:]); Task { _ = try? await URLSession.shared.data(for: r) } }
+        Keychain.delete(API.tokenKey)
+        UserDefaults.standard.removeObject(forKey: API.whoKey)
+        signedIn = false; who = nil; usage = nil
+        if model?.isLamport == true { UserDefaults.standard.removeObject(forKey: "model") }
+        Task { await connectLamport(); await loadModels() }
+    }
+
+    /// the engine reaches models through lamport.si: an openai-compatible provider at API.proxyURL whose key is the
+    /// member's own app token. provider keys stay on the server; signed out, the provider and its key are taken away
+    func connectLamport() async {
+        guard engine.state == .ready else { return }
+        guard let token = API.token else { await configureLamport(models: nil); await setLamportKey(nil); await settle(false); return }
+        var list: [[String: Any]]
+        do {
+            list = try await API.call("/api/v1/models")["data"] as? [[String: Any]] ?? []
+            if let d = try? JSONSerialization.data(withJSONObject: list) { UserDefaults.standard.set(d, forKey: "lamportModels") }
+        } catch let e as API.HTTPError where e.status == 401 {
+            signOut(local: true); authError = "Your sign-in has expired. Sign in again."; return
+        } catch {
+            // offline: keep the provider with the models we last saw, the engine will say so if a call fails
+            Log.write("lamport models: \(error.localizedDescription)")
+            list = (UserDefaults.standard.data(forKey: "lamportModels").flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [[String: Any]]) ?? []
+        }
+        await setLamportKey(token)
+        await configureLamport(models: list)
+        await refreshUsage()
+        await settle(!list.isEmpty)
+    }
+
+    /// the engine picks up its config file on its own; wait until lamport's models come or go before the picker reads them
+    private func settle(_ on: Bool) async {
+        for _ in 0..<20 {
+            let have = (try? await engine.data("/api/model") as? [[String: Any]])?.contains { $0["providerID"] as? String == Store.provider } ?? false
+            if have == on { return }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+    }
+
+    /// the provider block in the engine's own global config, merged into whatever else is there
+    private func configureLamport(models list: [[String: Any]]?) async {
+        guard let dirs = try? await engine.call("/api/config") as? [[String: Any]],
+              let dir = dirs.first(where: { $0["type"] as? String == "directory" })?["path"] as? String else { Log.write("lamport: no engine config folder"); return }
+        let folder = URL(fileURLWithPath: dir, isDirectory: true)
+        let file = folder.appendingPathComponent(folder.lastPathComponent + ".json")
+        var config = (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        var providers = config["providers"] as? [String: Any] ?? [:]
+        let current = config["model"] as? String
+        if let list, !list.isEmpty {
+            var models: [String: Any] = [:]
+            for m in list {
+                guard let id = m["id"] as? String, (m["available"] as? Bool) != false else { continue }
+                models[id] = ["name": m["name"] as? String ?? id, "capabilities": ["tools": true, "temperature": true], "limit": ["context": m["context_length"] as? Int ?? 128_000, "output": m["max_output"] as? Int ?? 32_000]]
+            }
+            providers[Store.provider] = ["name": "Lamport", "package": "@lamport/ai/providers/openai-compatible", "settings": ["baseURL": API.proxyURL.absoluteString], "models": models]
+            let first = list.first { ($0["available"] as? Bool) != false }?["id"] as? String
+            if let first, current == nil || current!.hasPrefix(Store.provider + "/") && models[String(current!.dropFirst(Store.provider.count + 1))] == nil { config["model"] = "\(Store.provider)/\(first)" }
+        } else {
+            providers[Store.provider] = nil
+            if current?.hasPrefix(Store.provider + "/") == true { config["model"] = nil }
+        }
+        config["providers"] = providers.isEmpty ? nil : providers
+        guard let out = try? JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys]) else { return }
+        if (try? Data(contentsOf: file)) == out { return }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        do { try out.write(to: file, options: .atomic); Log.write("lamport provider \(list?.isEmpty == false ? "on" : "off")") } catch { Log.write("lamport config: \(error.localizedDescription)") }
+    }
+
+    /// the token as the provider's key in the engine's credential store; nil takes it out
+    private func setLamportKey(_ token: String?) async {
+        let all = (try? await engine.data("/api/credential") as? [[String: Any]]) ?? []
+        let ours = all.filter { $0["integrationID"] as? String == Store.provider }
+        if let token, ours.count == 1, ours[0]["active"] as? Bool == true, (ours[0]["value"] as? [String: Any])?["key"] as? String == token { return }
+        for c in ours { if let id = c["id"] as? String { _ = try? await engine.call("/api/credential/\(id)", method: "DELETE") } }
+        guard let token else { return }
+        do { try await engine.call("/api/credential", method: "POST", json: ["integrationID": Store.provider, "label": "Lamport", "value": ["type": "key", "key": token]]) }
+        catch { Log.write("lamport key: \(error.localizedDescription)") }
+    }
+
+    nonisolated static func tokens(_ n: Int) -> String { n >= 1_000_000 ? String(format: "%.1fM", Double(n) / 1e6) : n >= 1000 ? "\(n / 1000)k" : "\(n)" }
+
+    func refreshUsage() async {
+        guard API.token != nil, let u = try? await API.call("/api/v1/usage") else { return }
+        let turns = u["turns"] as? [String: Any], tokens = u["tokens"] as? [String: Any]
+        usage = Usage(pro: u["pro"] as? Bool ?? false, turns: turns?["used"] as? Int ?? 0, turnLimit: turns?["limit"] as? Int ?? 0, tokens: tokens?["used"] as? Int ?? 0, tokenLimit: tokens?["limit"] as? Int ?? 0)
     }
 
     // MARK: the side panel
@@ -466,6 +614,7 @@ final class Store: ObservableObject {
 
     private func finished(_ sid: String) {
         busy.remove(sid)
+        if signedIn { Task { await refreshUsage() } }
         asks.removeAll { $0.sessionID == sid }
         touch(sid)
         Task { await refreshSide() }
