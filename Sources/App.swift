@@ -4,57 +4,65 @@ import AppKit
 @main
 struct LamportBuildApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var desk = DeskModel()
+    @StateObject private var store = Store()
     var body: some Scene {
         WindowGroup {
-            RootView()
-                .environmentObject(desk)
-                .frame(minWidth: 980, minHeight: 640)
+            Desk()
+                .environmentObject(store)
+                .environmentObject(store.engine)
+                .frame(minWidth: 960, minHeight: 600)
                 .preferredColorScheme(.dark)
                 .background(WindowSetup())
-                .task { await desk.loadMeta(); await desk.checkForUpdate() }
+                .task { delegate.store = store; await store.boot() }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1440, height: 900)
-        .commands { DeskCommands(desk: desk) }
-        Settings { SettingsView() }
+        .commands { DeskCommands(store: store) }
+        Settings { SettingsView().environmentObject(store) }
     }
 }
 
 struct DeskCommands: Commands {
-    @ObservedObject var desk: DeskModel
+    @ObservedObject var store: Store
     var body: some Commands {
-            CommandGroup(replacing: .newItem) {
-                Button("New Session") { desk.newSession() }.keyboardShortcut("n")
-                Button("Open Folder…") { desk.pickFolder() }.keyboardShortcut("o")
-            }
-            CommandGroup(after: .undoRedo) { Button("Undo Last Turn") { desk.undoLastTurn() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!desk.canUndo) }
-            CommandMenu("Build") {
-                Button("Run") { Task { await desk.startRun("installing and starting the project") } }.keyboardShortcut("r").disabled(!desk.canPreview || desk.isStatic)
-                Button("Stop Run") { Task { await desk.runtime.stop() } }.keyboardShortcut(".", modifiers: [.command, .shift])
-                Button("Stop Agent") { desk.stop() }.keyboardShortcut(".").disabled(!desk.busy)
-                Divider()
-                Button("Toggle Terminal") { desk.termOpen.toggle() }.keyboardShortcut("`")
-                Button(desk.sideTab == 0 ? "Show Preview" : "Show Files") { desk.sideTab = desk.sideTab == 0 ? 1 : 0 }.keyboardShortcut("p", modifiers: [.command, .shift])
-                Divider()
-                Button("Reload Folder") { if let f = desk.folder { Task { await desk.openFolder(f) } } }.keyboardShortcut("r", modifiers: [.command, .shift])
-            }
-            CommandMenu("Account") {
-                if desk.signedIn { Button("Sign Out\(desk.who.map { " (\($0))" } ?? "")") { desk.signOut() } } else { Button("Sign In…") { desk.signIn() } }
-                Button("Open lamport.si") { NSWorkspace.shared.open(API.siteURL("/app")) }
-                Button("Check for Updates") { Task { await desk.checkForUpdate(); if desk.update == nil { desk.say("You have the latest build (\(desk.version)).") } } }
-            }
+        CommandGroup(replacing: .newItem) {
+            Button("New Session") { store.newSession() }.keyboardShortcut("n")
+            Button("Open Folder…") { store.pickFolder() }.keyboardShortcut("o")
         }
+        CommandMenu("Session") {
+            Button("Stop") { store.stop() }.keyboardShortcut(".").disabled(!store.isBusy)
+            Divider()
+            ForEach(Mode.allCases) { m in Button(m.title) { store.mode = m }.keyboardShortcut(KeyEquivalent(Character("\(Mode.allCases.firstIndex(of: m)! + 1)")), modifiers: [.command, .shift]) }
+        }
+        CommandMenu("View") {
+            Button(store.sideOpen ? "Hide Side Panel" : "Show Side Panel") { store.sideOpen.toggle() }.keyboardShortcut("b", modifiers: [.command, .option])
+            Button("Diff") { store.sideOpen = true; store.sideTab = .diff }.keyboardShortcut("d", modifiers: [.command, .shift])
+            Button("Terminal") { store.sideOpen = true; store.sideTab = .terminal }.keyboardShortcut("j", modifiers: [.command])
+        }
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    var store: Store?
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationDidBecomeActive(_ notification: Notification) { NSApp.dockTile.badgeLabel = nil }
-    func applicationDidFinishLaunching(_ notification: Notification) { Log.write("launch \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "") api=\(API.base)") }
+    private var signals: [DispatchSourceSignal] = []
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        Log.write("launch \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "")")
+        // a kill or a logout must take the engine down with the app, not leave it listening
+        for sig in [SIGTERM, SIGINT, SIGHUP] {
+            signal(sig, SIG_IGN)
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            src.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.store?.engine.stop() }; exit(0) }
+            src.resume()
+            signals.append(src)
+        }
+    }
+    func applicationWillTerminate(_ notification: Notification) { MainActor.assumeIsolated { store?.engine.stop() } }
 }
 
-/// the window itself: our dark glass, draggable by its background, traffic lights floating over the rail
+/// our dark window: transparent title bar, traffic lights over the sidebar, draggable by its background
 struct WindowSetup: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let v = NSView()
@@ -62,10 +70,9 @@ struct WindowSetup: NSViewRepresentable {
             guard let w = v.window else { return }
             w.titlebarAppearsTransparent = true
             w.titleVisibility = .hidden
-            w.isMovableByWindowBackground = true
+            w.isMovableByWindowBackground = false
             w.backgroundColor = NSColor(Theme.bg)
-            w.isOpaque = true
-            w.minSize = NSSize(width: 980, height: 640)
+            w.styleMask.insert(.fullSizeContentView)
         }
         return v
     }

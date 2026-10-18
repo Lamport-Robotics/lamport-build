@@ -1,20 +1,24 @@
 import SwiftUI
 
-/// the build desk's studio palette, the same tokens the web desk uses
+/// the desk's palette: quiet warm-neutral darks, one white for the primary action, colour only where it means something
 enum Theme {
-    static let bg = Color(hex: 0x191919)
-    static let bg2 = Color(hex: 0x242424)
-    static let bg3 = Color(hex: 0x2d2d2d)
-    static let line = Color(hex: 0x303030)
-    static let line2 = Color(hex: 0x424242)
-    static let ink = Color(hex: 0xededed)
-    static let ink2 = Color(hex: 0xb7b7b7)
-    static let mute = Color(hex: 0x8c8c8c)
-    static let dim = Color(hex: 0x686868)
-    static let green = Color(hex: 0xb8c3ae)
-    static let amber = Color(hex: 0xe2c36b)
-    static let red = Color(hex: 0xff8a8a)
-    static let add = Color(hex: 0x8fe3a8)
+    static let bg = Color(hex: 0x161616)        // window, sidebar
+    static let main = Color(hex: 0x1c1c1c)      // the conversation
+    static let side = Color(hex: 0x181818)      // diff and terminal
+    static let raised = Color(hex: 0x252525)    // bubbles, composer, cards
+    static let hover = Color.white.opacity(0.05)
+    static let selected = Color.white.opacity(0.085)
+    static let line = Color.white.opacity(0.07)
+    static let line2 = Color.white.opacity(0.12)
+    static let ink = Color(hex: 0xececec)
+    static let ink2 = Color(hex: 0xbdbdbd)
+    static let mute = Color(hex: 0x8a8a8a)
+    static let dim = Color(hex: 0x616161)
+    static let green = Color(hex: 0x7fd19b)
+    static let amber = Color(hex: 0xe6c06a)
+    static let red = Color(hex: 0xf08a8a)
+    static let addBg = Color(hex: 0x7fd19b, alpha: 0.10)
+    static let delBg = Color(hex: 0xf08a8a, alpha: 0.10)
 
     static func sans(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font { .system(size: size, weight: weight) }
     static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font { .system(size: size, weight: weight, design: .monospaced) }
@@ -26,44 +30,55 @@ extension Color {
     }
 }
 
-/// a pill with the desk's soft metal gradient
-struct Pill: ViewModifier {
-    var height: CGFloat = 43
-    var primary = false
-    func body(content: Content) -> some View {
-        content
-            .font(Theme.sans(13))
-            .foregroundStyle(primary ? Color(hex: 0x111111) : Color(hex: 0xd6d6d6))
-            .padding(.horizontal, 20)
-            .frame(height: height)
-            .background(
-                Capsule().fill(primary
-                    ? LinearGradient(colors: [Color(hex: 0xf0f0f0), Color(hex: 0xcfcfcf)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                    : LinearGradient(colors: [Color(hex: 0x303030), Color(hex: 0x282828)], startPoint: .topLeading, endPoint: .bottomTrailing))
-            )
-            .overlay(Capsule().strokeBorder(Color.white.opacity(primary ? 0 : 0.03)))
-            .overlay(Capsule().strokeBorder(LinearGradient(colors: [Color.white.opacity(primary ? 0.25 : 0.06), .clear], startPoint: .top, endPoint: .bottom)).padding(0.5))
+/// the flat button style the desk uses everywhere: no chrome, a soft fill on hover
+struct Flat: ButtonStyle {
+    var pad: CGFloat = 6
+    func makeBody(configuration: Configuration) -> some View { FlatBody(configuration: configuration, pad: pad) }
+    struct FlatBody: View {
+        let configuration: Configuration; let pad: CGFloat
+        @State private var hover = false
+        var body: some View {
+            configuration.label
+                .padding(.horizontal, pad).padding(.vertical, pad * 0.6)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(hover || configuration.isPressed ? Theme.hover : .clear))
+                .contentShape(Rectangle())
+                .onHover { hover = $0 }
+        }
     }
 }
 
-struct Circle43: ViewModifier {
-    var size: CGFloat = 43
-    func body(content: Content) -> some View {
-        content
-            .foregroundStyle(Color(hex: 0xbbbbbb))
-            .frame(width: size, height: size)
-            .background(Circle().fill(LinearGradient(colors: [Color(hex: 0x343434).opacity(0.67), Color(hex: 0x272727).opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing)))
-            .overlay(Circle().strokeBorder(Color.white.opacity(0.07)))
-            .overlay(Circle().strokeBorder(LinearGradient(colors: [Color.white.opacity(0.1), .clear], startPoint: .top, endPoint: .bottom)).padding(0.5))
-    }
-}
-
-extension View {
-    func pill(height: CGFloat = 43, primary: Bool = false) -> some View { modifier(Pill(height: height, primary: primary)) }
-    func circle43(_ size: CGFloat = 43) -> some View { modifier(Circle43(size: size)) }
-}
-
-/// the hover-free flat button style the desk uses everywhere
 struct Quiet: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View { configuration.label.opacity(configuration.isPressed ? 0.7 : 1) }
+    func makeBody(configuration: Configuration) -> some View { configuration.label.opacity(configuration.isPressed ? 0.6 : 1).contentShape(Rectangle()) }
+}
+
+/// the white pill for the one thing you most likely want to press
+struct Primary: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(Theme.sans(12.5, .medium))
+            .foregroundStyle(Color(hex: 0x141414))
+            .padding(.horizontal, 12).frame(height: 28)
+            .background(Capsule().fill(Color(hex: 0xededed).opacity(configuration.isPressed ? 0.8 : 1)))
+    }
+}
+
+struct Secondary: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(Theme.sans(12.5))
+            .foregroundStyle(Theme.ink2)
+            .padding(.horizontal, 12).frame(height: 28)
+            .background(Capsule().fill(Color.white.opacity(configuration.isPressed ? 0.1 : 0.06)))
+            .overlay(Capsule().strokeBorder(Theme.line))
+    }
+}
+
+func ago(_ d: Date) -> String {
+    let s = Int(-d.timeIntervalSinceNow)
+    if s < 60 { return "now" }
+    if s < 3600 { return "\(s / 60)m" }
+    if s < 86400 { return "\(s / 3600)h" }
+    if s < 86400 * 7 { return "\(s / 86400)d" }
+    let f = DateFormatter(); f.dateFormat = "d MMM"
+    return f.string(from: d)
 }
