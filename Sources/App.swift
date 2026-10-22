@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Sparkle
 
 @main
 struct LamportBuildApp: App {
@@ -18,7 +19,10 @@ struct LamportBuildApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1440, height: 900)
-        .commands { DeskCommands(store: store) }
+        .commands {
+            CommandGroup(after: .appInfo) { CheckForUpdates(updater: delegate.updates.updater) }
+            DeskCommands(store: store)
+        }
         Settings { SettingsView().environmentObject(store) }
     }
 }
@@ -45,6 +49,8 @@ struct DeskCommands: Commands {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var store: Store?
+    /// updates come from lamport.si/mac/appcast.xml, signed with our update key; checked once a day
+    let updates = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationDidBecomeActive(_ notification: Notification) { NSApp.dockTile.badgeLabel = nil }
     private var signals: [DispatchSourceSignal] = []
@@ -60,6 +66,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     func applicationWillTerminate(_ notification: Notification) { MainActor.assumeIsolated { store?.engine.stop() } }
+}
+
+/// "Check for Updates…" in the app menu, greyed out while a check is already running
+struct CheckForUpdates: View {
+    @ObservedObject private var model: CanCheck
+    private let updater: SPUUpdater
+    init(updater: SPUUpdater) { self.updater = updater; model = CanCheck(updater) }
+    var body: some View { Button("Check for Updates…") { updater.checkForUpdates() }.disabled(!model.ready) }
+
+    final class CanCheck: ObservableObject {
+        @Published var ready = false
+        init(_ updater: SPUUpdater) { updater.publisher(for: \.canCheckForUpdates).assign(to: &$ready) }
+    }
 }
 
 /// our dark window: transparent title bar, traffic lights over the sidebar, draggable by its background

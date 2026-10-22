@@ -15,4 +15,8 @@
   <key>NSHumanReadableCopyright</key><string>Lamport Robotics</string>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
   <key>NSHighResolutionCapable</key><true/>
+  <key>SUFeedURL</key><string>https://lamport.si/mac/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>AYxLIwEEpsM2aRfxBvjNz9IhmzVZzItUOZCEZo66fIs=</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>86400</integer>
 </dict></plist>
