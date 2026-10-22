@@ -4,6 +4,10 @@
 #   own identity:  SIGNING_ENV=/path/to/signing.env scripts/release.sh   (KEYCHAIN, KEYCHAIN_PASSWORD, SIGN_IDENTITY)
 #   neither:       ad-hoc
 # a stable identity keeps keychain access across updates; ad-hoc asks again after every build.
+# with SPARKLE_BIN (sparkle's bin folder) and SPARKLE_KEY (the update key file) it also writes the update feed:
+#   build/updates keeps every zip and the appcast between releases; PUBLISH (default build/publish) gets what goes
+#   to https://lamport.si/mac/: appcast.xml, the new zip and dmg, and latest.json for builds older than sparkle.
+#   release notes, if any, come from scripts/notes/<version>.md
 # keep these files and passwords out of the repo.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -12,8 +16,17 @@ xcodebuild -project LamportBuild.xcodeproj -scheme LamportBuild -configuration R
 APP="build/Build/Products/Release/Lamport Build.app"
 ENGINE="$APP/Contents/Resources/engine/lamport-engine"
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP/Contents/Info.plist")
+SPK="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+# everything nested, innermost first: sparkle's helpers, the framework, the engine; the app itself goes last
+nested() {
+  for x in "$SPK/XPCServices/Installer.xpc" "$SPK/XPCServices/Downloader.xpc" "$SPK/Autoupdate" "$SPK/Updater.app" "$APP/Contents/Frameworks/Sparkle.framework"; do
+    [ -e "$x" ] && "$@" "$x"
+  done
+  return 0
+}
 # inside out: the engine binary first, then the app around it
 if [ -n "${SIGN_ID:-}" ]; then
+  nested codesign --force --options runtime --timestamp --preserve-metadata=entitlements --sign "$SIGN_ID"
   [ -f "$ENGINE" ] && codesign --force --options runtime --timestamp --entitlements scripts/engine.entitlements --sign "$SIGN_ID" "$ENGINE"
   codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP"
 elif [ -n "${SIGNING_ENV:-}" ]; then
@@ -23,6 +36,7 @@ elif [ -n "${SIGNING_ENV:-}" ]; then
   OLD=(); while IFS= read -r k; do k="${k//\"/}"; OLD+=("${k#"${k%%[![:space:]]*}"}"); done < <(security list-keychains -d user)
   trap 'security list-keychains -d user -s "${OLD[@]}"' EXIT
   security list-keychains -d user -s "${OLD[@]}" "$KEYCHAIN"
+  nested codesign --force --preserve-metadata=entitlements --keychain "$KEYCHAIN" --sign "$SIGN_IDENTITY"
   [ -f "$ENGINE" ] && codesign --force --keychain "$KEYCHAIN" --sign "$SIGN_IDENTITY" "$ENGINE"
   codesign --force --keychain "$KEYCHAIN" --sign "$SIGN_IDENTITY" "$APP"
   security list-keychains -d user -s "${OLD[@]}"; trap - EXIT
@@ -30,9 +44,9 @@ else
   codesign --force --deep --sign - "$APP"
 fi
 codesign --verify --strict --verbose=1 "$APP"
-ZIP="build/Lamport Build $VERSION.zip"; rm -f "$ZIP"
+ZIP="build/Lamport-Build-$VERSION.zip"; rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
-OUT="build/Lamport Build $VERSION.dmg"; rm -f "$OUT"
+OUT="build/Lamport-Build-$VERSION.dmg"; rm -f "$OUT"
 STAGE=$(mktemp -d); cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
 mkdir "$STAGE/.background"; cp scripts/dmg/background.tiff "$STAGE/.background/background.tiff"
 # lay the window out on a writable copy, then compress it
@@ -41,7 +55,7 @@ hdiutil create -volname "Lamport Build" -srcfolder "$STAGE" -ov -format UDRW -fs
 MOUNT=$(hdiutil attach -readwrite -noverify -noautoopen "$RW" | grep -o '/Volumes/.*$')
 osascript <<EOF
 tell application "Finder"
-  tell disk "$(basename "$MOUNT")"
+  tell folder (POSIX file "$MOUNT" as alias)
     open
     set current view of container window to icon view
     set toolbar visible of container window to false
@@ -71,4 +85,14 @@ if [ -n "${SIGN_ID:-}" ]; then
     xcrun stapler staple "$OUT"
   fi
 fi
-ls -la "$OUT" "$ZIP"
+if [ -n "${SPARKLE_BIN:-}" ] && [ -n "${SPARKLE_KEY:-}" ]; then
+  UPD=build/updates; PUB=${PUBLISH:-build/publish}; mkdir -p "$UPD" "$PUB"
+  cp "$ZIP" "$UPD/"
+  NOTES="scripts/notes/$VERSION.md"; [ -f "$NOTES" ] && cp "$NOTES" "$UPD/Lamport-Build-$VERSION.md"
+  "$SPARKLE_BIN/generate_appcast" --ed-key-file "$SPARKLE_KEY" --download-url-prefix https://lamport.si/mac/ --embed-release-notes --maximum-versions 10 "$UPD"
+  cp "$UPD/appcast.xml" "$ZIP" "$OUT" "$PUB/"
+  printf '{ "version": "%s", "url": "https://lamport.si/mac/%s", "notes": "%s" }\n' "$VERSION" "$(basename "$OUT")" "Lamport Build $VERSION. Updates install by themselves from here on." > "$PUB/latest.json"
+  ls -la "$PUB"
+else
+  ls -la "$OUT" "$ZIP"
+fi
