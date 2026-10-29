@@ -6,6 +6,16 @@ there. Edits and commands wait for your OK, the diff updates as it works, and a 
 Native SwiftUI: sessions on the left, the conversation in the middle, diff and terminal on the right.
 Models run through lamport.si with your own sign-in; no provider keys are stored on the Mac.
 
+## install
+
+```
+curl -fsSL https://lamport.si/install | bash
+```
+
+Apple silicon, macOS 14+. The script reads the release feed, checks the app is signed by Lamport
+Robotics, puts it in /Applications and opens it; updates arrive inside the app. `INSTALL_DIR` and
+`NO_OPEN=1` are honoured. The dmg is at https://lamport.si/mac/ if you prefer to drag.
+
 ## build
 
 ```
