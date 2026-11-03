@@ -1,15 +1,14 @@
 import SwiftUI
 
-/// the window: sessions on the left, the conversation in the middle, diff and terminal on the right
+/// the window: sessions on the left, the conversation in the middle, diff, files and terminal on the right
 struct Desk: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var engine: Engine
     @State private var sideWidth: CGFloat = CGFloat(UserDefaults.standard.double(forKey: "sideWidth")).clamped(360, 820, or: 460)
-    @State private var sidebar = true
 
     var body: some View {
         HStack(spacing: 0) {
-            if sidebar {
+            if store.sidebar {
                 Sidebar().frame(width: 252)
                 Rectangle().fill(Theme.line).frame(width: 1)
             }
@@ -18,7 +17,7 @@ struct Desk: View {
                 switch engine.state {
                 case .starting: Starting()
                 case .failed(let why): EngineDown(why: why)
-                case .ready: Conversation(sidebar: $sidebar)
+                case .ready: Conversation(sidebar: $store.sidebar)
                 }
             }
             if store.sideOpen, engine.state == .ready, store.directory != nil {
@@ -38,8 +37,11 @@ struct Desk: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .overlay { if store.palette { Palette() } }
+        .sheet(isPresented: $store.shortcuts) { ShortcutsSheet() }
         .animation(.easeOut(duration: 0.18), value: store.toast)
         .animation(.easeOut(duration: 0.18), value: store.sideOpen)
+        .animation(.easeOut(duration: 0.12), value: store.palette)
     }
 }
 
@@ -60,9 +62,12 @@ struct Splitter: View {
 
 struct Starting: View {
     var body: some View {
-        VStack(spacing: 12) {
-            ProgressView().controlSize(.small)
-            Text("Starting the engine").font(Theme.sans(12.5)).foregroundStyle(Theme.mute)
+        VStack(spacing: 14) {
+            Image("Mark").resizable().interpolation(.high).scaledToFit().frame(height: 30).opacity(0.5)
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Starting the engine").font(Theme.sans(12.5)).foregroundStyle(Theme.mute)
+            }
         }
     }
 }
@@ -74,6 +79,7 @@ struct EngineDown: View {
             Image(systemName: "exclamationmark.triangle").font(.system(size: 20)).foregroundStyle(Theme.amber)
             Text(why).font(Theme.sans(13)).foregroundStyle(Theme.ink2)
             Text("Details are in \(Store.short(Log.file.path))").font(Theme.sans(11.5)).foregroundStyle(Theme.dim)
+            Button("Show the log") { NSWorkspace.shared.activateFileViewerSelecting([Log.file]) }.buttonStyle(Secondary()).padding(.top, 6)
         }
     }
 }
@@ -92,6 +98,9 @@ struct Sidebar: View {
                 HStack(spacing: 7) {
                     Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Theme.dim)
                     TextField("Search sessions", text: $store.search).textFieldStyle(.plain).font(Theme.sans(12.5)).foregroundStyle(Theme.ink2)
+                    if !store.search.isEmpty {
+                        Button { store.search = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(Theme.dim) }.buttonStyle(Quiet())
+                    }
                 }
                 .padding(.horizontal, 8).frame(height: 28)
             }
@@ -112,7 +121,8 @@ struct Sidebar: View {
             Account().padding(.horizontal, 8).padding(.top, 10)
             HStack(spacing: 4) {
                 Button { store.pickFolder() } label: { Row(icon: "folder.badge.plus", title: "Open folder…", hint: "⌘O") }.buttonStyle(Flat(pad: 8))
-                SettingsLink { Image(systemName: "gearshape").font(.system(size: 12.5)).foregroundStyle(Theme.mute).frame(width: 28, height: 28) }.buttonStyle(Flat(pad: 0))
+                Button { store.palette = true } label: { Image(systemName: "command").font(.system(size: 12)).foregroundStyle(Theme.mute).frame(width: 28, height: 28) }.buttonStyle(Flat(pad: 0)).help("Commands  ⌘K")
+                SettingsLink { Image(systemName: "gearshape").font(.system(size: 12.5)).foregroundStyle(Theme.mute).frame(width: 28, height: 28) }.buttonStyle(Flat(pad: 0)).help("Settings  ⌘,")
             }
             .padding(8)
         }
@@ -169,7 +179,7 @@ struct Avatar: View {
     var who: String?; var size: CGFloat
     var body: some View {
         Text(String((who ?? "L").prefix(1)).uppercased())
-            .font(Theme.sans(size * 0.46, .semibold)).foregroundStyle(Color(hex: 0x141414))
+            .font(Theme.sans(size * 0.46, .medium)).foregroundStyle(Color(hex: 0x141414))
             .frame(width: size, height: size)
             .background(Circle().fill(Theme.cream))
     }
@@ -189,7 +199,7 @@ struct AccountCard: View {
                 }
                 Spacer()
                 if let u = store.usage {
-                    Text(u.pro ? "PRO" : "FREE").font(Theme.sans(9.5, .bold)).tracking(0.8)
+                    Text(u.pro ? "PRO" : "FREE").font(Theme.sans(9.5, .medium)).tracking(0.8)
                         .foregroundStyle(u.pro ? Color(hex: 0x141414) : Theme.ink2)
                         .padding(.horizontal, 7).frame(height: 18)
                         .background(Capsule().fill(u.pro ? Theme.cream : Color.white.opacity(0.08)))
@@ -207,6 +217,7 @@ struct AccountCard: View {
             VStack(spacing: 2) {
                 Button { NSWorkspace.shared.open(API.siteURL("/app")); close() } label: { Row(icon: "arrow.up.right.square", title: "Open lamport.si") }.buttonStyle(Flat(pad: 7))
                 SettingsLink { Row(icon: "gearshape", title: "Settings…", hint: "⌘,") }.buttonStyle(Flat(pad: 7))
+                Button { close(); store.shortcuts = true } label: { Row(icon: "keyboard", title: "Keyboard shortcuts", hint: "⌘/") }.buttonStyle(Flat(pad: 7))
                 Button { close(); store.signOut() } label: { Row(icon: "rectangle.portrait.and.arrow.right", title: "Sign out") }.buttonStyle(Flat(pad: 7))
             }
         }
@@ -236,7 +247,7 @@ struct Brand: View {
     var body: some View {
         HStack(spacing: 8) {
             Image("Mark").resizable().interpolation(.high).scaledToFit().frame(height: 18)
-            (Text("Lamport").foregroundStyle(Theme.ink) + Text(" Build").foregroundStyle(Theme.mute)).font(Theme.sans(13, .semibold))
+            (Text("Lamport").foregroundStyle(Theme.ink) + Text(" Build").foregroundStyle(Theme.mute)).font(Theme.sans(13, .medium))
             Spacer()
         }
         .padding(.top, 2)
@@ -265,12 +276,12 @@ struct ProjectSection: View {
         let rows = store.rows(for: project)
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 6) {
-                Button { open.toggle() } label: {
+                Button { withAnimation(.easeOut(duration: 0.12)) { open.toggle() } } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: open ? "chevron.down" : "chevron.right").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(Theme.dim).frame(width: 10)
-                        Text(project.name).font(Theme.sans(11.5, .semibold)).foregroundStyle(Theme.mute).lineLimit(1)
+                        Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(Theme.dim).frame(width: 10).rotationEffect(.degrees(open ? 90 : 0))
+                        Text(project.name).font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.mute).lineLimit(1)
                     }
-                }.buttonStyle(Quiet())
+                }.buttonStyle(Quiet()).help(Store.short(project.path))
                 Spacer()
                 Button { store.newSession(in: project.path) } label: { Image(systemName: "plus").font(.system(size: 10.5, weight: .medium)).foregroundStyle(Theme.mute) }
                     .buttonStyle(Flat(pad: 4)).help("New session in \(project.name)")
@@ -279,6 +290,8 @@ struct ProjectSection: View {
             .contextMenu {
                 Button("New Session") { store.newSession(in: project.path) }
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: project.path)]) }
+                Button("Open in Terminal") { store.openInTerminal(project.path) }
+                Button("Copy path") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(project.path, forType: .string) }
                 Divider()
                 Button("Remove from Sidebar") { store.removeProject(project) }
             }
@@ -293,12 +306,17 @@ struct ProjectSection: View {
                     .buttonStyle(Quiet())
                     .contextMenu {
                         Button("Rename…") { rename(r) }
+                        Button("Fork") { store.fork(r) }
+                        Divider()
                         Button("Delete", role: .destructive) { store.delete(r) }
                     }
                 }
                 if rows.count > 8 {
-                    Button(showAll ? "Show less" : "Show \(rows.count - 8) more") { showAll.toggle() }
+                    Button(showAll ? "Show less" : "Show \(rows.count - 8) more") { withAnimation(.easeOut(duration: 0.12)) { showAll.toggle() } }
                         .buttonStyle(Quiet()).font(Theme.sans(11.5)).foregroundStyle(Theme.dim).padding(.horizontal, 26).padding(.top, 2)
+                }
+                if rows.isEmpty, !(store.draftProject == project.path && store.current == nil) {
+                    Text(store.query.isEmpty ? "No sessions yet" : "No matches").font(Theme.sans(11.5)).foregroundStyle(Theme.dim).padding(.horizontal, 26).padding(.vertical, 4)
                 }
             }
         }
@@ -333,6 +351,157 @@ struct SessionItem: View {
         .padding(.horizontal, 8)
         .contentShape(Rectangle())
         .onHover { hover = $0 }
+    }
+}
+
+// MARK: the command palette
+
+struct Action: Identifiable {
+    let id: String
+    let title: String
+    let detail: String?
+    let icon: String
+    let keys: String?
+    let run: () -> Void
+}
+
+struct Palette: View {
+    @EnvironmentObject var store: Store
+    @State private var query = ""
+    @State private var pick = 0
+    @FocusState private var focused: Bool
+
+    var actions: [Action] {
+        var out: [Action] = [
+            Action(id: "new", title: "New session", detail: store.directory.map { URL(fileURLWithPath: $0).lastPathComponent }, icon: "square.and.pencil", keys: "⌘N") { store.newSession() },
+            Action(id: "open", title: "Open folder…", detail: nil, icon: "folder.badge.plus", keys: "⌘O") { store.pickFolder() },
+            Action(id: "diff", title: "Show diff", detail: nil, icon: "plusminus", keys: "⇧⌘D") { store.sideTab = .diff; store.sideOpen = true },
+            Action(id: "files", title: "Show files", detail: nil, icon: "doc.text", keys: "⇧⌘E") { store.sideTab = .files; store.sideOpen = true },
+            Action(id: "term", title: "Show terminal", detail: nil, icon: "terminal", keys: "⌘J") { store.sideTab = .terminal; store.sideOpen = true },
+            Action(id: "side", title: store.sideOpen ? "Hide side panel" : "Show side panel", detail: nil, icon: "sidebar.right", keys: "⌥⌘B") { store.sideOpen.toggle() },
+            Action(id: "sidebar", title: store.sidebar ? "Hide sidebar" : "Show sidebar", detail: nil, icon: "sidebar.left", keys: "⌘\\") { store.sidebar.toggle() },
+        ]
+        for m in Mode.allCases { out.append(Action(id: "mode-\(m.rawValue)", title: "Permissions: \(m.title)", detail: m == store.mode ? "current" : nil, icon: m.icon, keys: "⇧⌘\(Mode.allCases.firstIndex(of: m)! + 1)") { store.mode = m }) }
+        for m in store.models where !m.locked { out.append(Action(id: "model-\(m.key)", title: "Model: \(m.name)", detail: m == store.model ? "current" : (m.isLocal ? "on this Mac" : "Lamport"), icon: "cpu", keys: nil) { store.choose(m) }) }
+        if store.current != nil {
+            out.append(Action(id: "compact", title: "Compact the context", detail: "fold the history into a summary", icon: "arrow.down.right.and.arrow.up.left", keys: nil) { store.compact() })
+            if let r = store.currentRow { out.append(Action(id: "fork", title: "Fork this session", detail: nil, icon: "arrow.triangle.branch", keys: nil) { store.fork(r) }) }
+        }
+        for c in store.commands { out.append(Action(id: "cmd-\(c.name)", title: "/" + c.name, detail: c.description, icon: "command", keys: nil) { store.draftText = "/" + c.name + " " }) }
+        if let d = store.directory {
+            out.append(Action(id: "finder", title: "Show folder in Finder", detail: Store.short(d), icon: "folder", keys: nil) { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: d)]) })
+            out.append(Action(id: "terminal-app", title: "Open folder in Terminal", detail: nil, icon: "apple.terminal", keys: nil) { store.openInTerminal(d) })
+        }
+        if !store.diffs.isEmpty { out.append(Action(id: "revert", title: "Revert all changes", detail: "\(store.diffs.count) files", icon: "arrow.uturn.backward", keys: nil) { store.revertAll() }) }
+        out.append(Action(id: "keys", title: "Keyboard shortcuts", detail: nil, icon: "keyboard", keys: "⌘/") { store.shortcuts = true })
+        out.append(Action(id: "settings", title: "Settings…", detail: nil, icon: "gearshape", keys: "⌘,") { NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) })
+        for s in store.sessions.filter({ $0.parentID == nil }).sorted(by: { $0.updated > $1.updated }).prefix(40) {
+            out.append(Action(id: "s-\(s.id)", title: s.title, detail: URL(fileURLWithPath: s.directory).lastPathComponent + " · " + ago(s.updated), icon: "bubble.left", keys: nil) { store.open(s.id) })
+        }
+        return out
+    }
+    var shown: [Action] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        if q.isEmpty { return Array(actions.prefix(14)) }
+        return actions.filter { $0.title.lowercased().contains(q) || ($0.detail?.lowercased().contains(q) ?? false) }.prefix(14).map { $0 }
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.opacity(0.35).ignoresSafeArea().onTapGesture { store.palette = false }
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass").font(.system(size: 13)).foregroundStyle(Theme.dim)
+                    TextField("Type a command, a model, a session…", text: $query)
+                        .textFieldStyle(.plain).font(Theme.sans(15)).foregroundStyle(Theme.ink)
+                        .focused($focused)
+                        .onSubmit { run() }
+                        .onChange(of: query) { _, _ in pick = 0 }
+                        .onKeyPress(.upArrow) { pick = max(0, pick - 1); return .handled }
+                        .onKeyPress(.downArrow) { pick = min(shown.count - 1, pick + 1); return .handled }
+                        .onKeyPress(.escape) { store.palette = false; return .handled }
+                    Keys(keys: "esc")
+                }
+                .padding(.horizontal, 16).frame(height: 50)
+                Rectangle().fill(Theme.line).frame(height: 1)
+                let list = shown
+                if list.isEmpty {
+                    Text("Nothing matches").font(Theme.sans(12.5)).foregroundStyle(Theme.dim).padding(20)
+                } else {
+                    VStack(spacing: 1) {
+                        ForEach(Array(list.enumerated()), id: \.element.id) { i, a in
+                            Button { store.palette = false; a.run() } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: a.icon).font(.system(size: 12)).foregroundStyle(i == pick ? Theme.ink2 : Theme.dim).frame(width: 16)
+                                    Text(a.title).font(a.title.hasPrefix("/") ? Theme.mono(12.5) : Theme.sans(13)).foregroundStyle(Theme.ink).lineLimit(1)
+                                    if let d = a.detail { Text(d).font(Theme.sans(12)).foregroundStyle(Theme.mute).lineLimit(1) }
+                                    Spacer()
+                                    if let k = a.keys { Keys(keys: k) }
+                                }
+                                .padding(.horizontal, 10).frame(height: 34)
+                                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(i == pick ? Theme.selected : .clear))
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(Quiet())
+                            .onHover { if $0 { pick = i } }
+                        }
+                    }
+                    .padding(6)
+                }
+            }
+            .frame(width: 560)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(hex: 0x232323)))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.line2))
+            .shadow(color: .black.opacity(0.5), radius: 30, y: 14)
+            .padding(.top, 110)
+            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        }
+        .onAppear { focused = true }
+    }
+    func run() {
+        let list = shown
+        guard pick < list.count else { return }
+        store.palette = false
+        list[pick].run()
+    }
+}
+
+/// every shortcut the desk answers to
+struct ShortcutsSheet: View {
+    @EnvironmentObject var store: Store
+    let groups: [(String, [(String, String)])] = [
+        ("Sessions", [("New session", "⌘N"), ("Open folder", "⌘O"), ("Commands", "⌘K"), ("Stop the agent", "esc"), ("Send", "↩"), ("New line", "⇧↩")]),
+        ("Composer", [("Mention a file", "@"), ("Run a command", "/"), ("Accept a suggestion", "⇥"), ("Allow an approval", "↩"), ("Deny an approval", "esc")]),
+        ("Permissions", [("Ask before edits", "⇧⌘1"), ("Edit automatically", "⇧⌘2"), ("Plan mode", "⇧⌘3"), ("Bypass permissions", "⇧⌘4")]),
+        ("Panels", [("Toggle sidebar", "⌘\\"), ("Toggle side panel", "⌥⌘B"), ("Diff", "⇧⌘D"), ("Files", "⇧⌘E"), ("Terminal", "⌘J"), ("Settings", "⌘,"), ("This list", "⌘/")]),
+    ]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Keyboard shortcuts").font(Theme.sans(15, .medium)).foregroundStyle(Theme.ink)
+                Spacer()
+                Button { store.shortcuts = false } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.mute) }.buttonStyle(Flat(pad: 6)).keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 20).frame(height: 52)
+            Rectangle().fill(Theme.line).frame(height: 1)
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .topLeading), GridItem(.flexible(), alignment: .topLeading)], alignment: .leading, spacing: 22) {
+                ForEach(groups, id: \.0) { g in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(g.0).font(Theme.sans(11, .medium)).foregroundStyle(Theme.dim).padding(.bottom, 4)
+                        ForEach(g.1, id: \.0) { k in
+                            HStack {
+                                Text(k.0).font(Theme.sans(12.5)).foregroundStyle(Theme.ink2)
+                                Spacer()
+                                Keys(keys: k.1)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(20)
+        }
+        .frame(width: 560)
+        .background(Theme.raised)
     }
 }
 

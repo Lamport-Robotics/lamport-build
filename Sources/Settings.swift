@@ -1,8 +1,11 @@
 import SwiftUI
+import Sparkle
 
-/// preferences: the lamport account, how much the agent may do on its own, and where the engine keeps its data
+/// preferences: the lamport account, how much the agent may do on its own, the folders, updates, and where things are kept
 struct SettingsView: View {
     @EnvironmentObject var store: Store
+    @State private var autoUpdate = (NSApp.delegate as? AppDelegate)?.updates.updater.automaticallyChecksForUpdates ?? true
+    var version: String { (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") + " (" + (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "") + ")" }
     var body: some View {
         Form {
             Section("Account") {
@@ -23,22 +26,48 @@ struct SettingsView: View {
                 }
             }
             Section("Agent") {
-                Picker("Default permissions", selection: $store.mode) {
+                Picker("Permissions", selection: $store.mode) {
                     ForEach(Mode.allCases) { Text($0.title).tag($0) }
                 }
                 Text("Ask before edits pauses on every file change and command. Bypass runs everything without asking; only use it in a folder you can throw away.").font(.caption).foregroundStyle(.secondary)
+                if let m = store.model { LabeledContent("Model", value: m.name + (m.isLocal ? " · on this Mac" : "")) }
             }
             Section("Folders") {
+                if store.projects.isEmpty { Text("No folders yet. Open one from the sidebar or with ⌘O.").font(.caption).foregroundStyle(.secondary) }
                 ForEach(store.projects) { p in
-                    HStack { Text(Store.short(p.path)).font(.system(.body, design: .monospaced)); Spacer(); Button("Remove") { store.removeProject(p) }.buttonStyle(.link) }
+                    HStack(spacing: 10) {
+                        Image(systemName: "folder").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(p.name)
+                            Text(Store.short(p.path)).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer()
+                        Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p.path)]) }.buttonStyle(.link)
+                        Button("Remove") { store.removeProject(p) }.buttonStyle(.link)
+                    }
+                }
+                Button("Open folder…") { store.pickFolder() }
+            }
+            Section("Updates") {
+                Toggle("Check for updates automatically", isOn: $autoUpdate)
+                    .onChange(of: autoUpdate) { _, on in (NSApp.delegate as? AppDelegate)?.updates.updater.automaticallyChecksForUpdates = on }
+                HStack {
+                    Text("Updates come from lamport.si, signed with Lamport's key.").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Check Now") { (NSApp.delegate as? AppDelegate)?.updates.updater.checkForUpdates() }
                 }
             }
             Section("Support") {
-                LabeledContent("Engine data", value: Store.short(Engine.home.path)).font(.caption)
-                LabeledContent("Log file", value: Store.short(Log.file.path)).font(.caption)
+                LabeledContent("Version", value: version)
+                HStack { LabeledContent("Engine data", value: Store.short(Engine.home.path)).font(.caption); Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([Engine.home]) }.buttonStyle(.link) }
+                HStack { LabeledContent("Log file", value: Store.short(Log.file.path)).font(.caption); Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([Log.file]) }.buttonStyle(.link) }
+                HStack {
+                    Button("Keyboard Shortcuts…") { store.shortcuts = true }
+                    Button("Source on GitHub") { NSWorkspace.shared.open(URL(string: "https://github.com/Lamport-Robotics/lamport-build")!) }
+                }
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 520)
+        .frame(width: 540, height: 620)
     }
 }
