@@ -12,12 +12,20 @@ struct API {
     static var account: String { base.host == "lamport.si" ? "" : "@\(base.host ?? "")\(base.port.map { ":\($0)" } ?? "")" }
     static var tokenKey: String { "appToken" + account }
     static var whoKey: String { "who" + account }
-    static var token: String? { Keychain.get(tokenKey) }
+    /// read once per launch; sign-in and sign-out refresh it
+    private static var cached: String??
+    static var token: String? {
+        if let c = cached { return c }
+        let t = Keychain.get(tokenKey)
+        cached = .some(t)
+        return t
+    }
+    static func forgetToken() { cached = nil }
 
     static func request(_ path: String, method: String = "GET", json: Any? = nil) -> URLRequest {
         var r = URLRequest(url: base.appendingPathComponent(path))
         r.httpMethod = method
-        r.setValue("Lamport Build for Mac/0.1", forHTTPHeaderField: "User-Agent")
+        r.setValue("Lamport Build for Mac/" + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"), forHTTPHeaderField: "User-Agent")
         if let t = token { r.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization") }
         else if isLocalDev { r.setValue("dev", forHTTPHeaderField: "x-dev-user") }
         if let json {

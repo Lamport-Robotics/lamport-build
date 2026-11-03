@@ -28,7 +28,7 @@ struct ToolCall: Identifiable {
     /// the one line that says what the call touches: the command, the path, the pattern; paths relative to the folder
     func subject(in root: String?) -> String {
         for k in ["command", "path", "filePath", "file_path", "pattern", "query", "url", "description", "prompt"] {
-            if let s = input[k] as? String, !s.isEmpty { return k.lowercased().contains("path") ? Store.short(s, root: root) : s }
+            if let s = input[k] as? String, !s.isEmpty { return k.lowercased().contains("path") ? Store.short(s, root: root) : s.components(separatedBy: "\n").first ?? s }
         }
         return ""
     }
@@ -44,7 +44,21 @@ struct ToolCall: Identifiable {
         case "websearch": "Web"
         case "task": "Agent"
         case "todowrite", "todoread": "Todo"
+        case "skill": "Skill"
         default: name.prefix(1).uppercased() + name.dropFirst()
+        }
+    }
+    var icon: String {
+        switch name {
+        case "shell", "bash": "terminal"
+        case "write": "square.and.pencil"
+        case "edit", "patch", "multiedit": "pencil.line"
+        case "read": "doc.text"
+        case "grep", "glob", "list", "ls": "magnifyingglass"
+        case "webfetch", "fetch", "websearch": "globe"
+        case "task": "person.2"
+        case "todowrite", "todoread": "checklist"
+        default: "wrench"
         }
     }
 }
@@ -65,6 +79,7 @@ struct Message: Identifiable {
     var text = ""
     var blocks: [Block] = []
     var at = Date()
+    var tools: Int { blocks.reduce(0) { if case .tool = $1 { $0 + 1 } else { $0 } } }
 }
 
 struct PermissionAsk: Identifiable {
@@ -82,6 +97,12 @@ struct FileDiff: Identifiable {
     let additions: Int
     let deletions: Int
     let status: String
+}
+
+struct Command: Identifiable, Hashable {
+    let name: String
+    let description: String
+    var id: String { name }
 }
 
 struct ModelChoice: Identifiable, Hashable {
@@ -116,6 +137,9 @@ enum Mode: String, CaseIterable, Identifiable {
     var short: String {
         switch self { case .ask: "Ask"; case .edits: "Auto-edit"; case .plan: "Plan"; case .bypass: "Bypass" }
     }
+    var icon: String {
+        switch self { case .ask: "hand.raised"; case .edits: "pencil"; case .plan: "list.bullet.clipboard"; case .bypass: "bolt" }
+    }
     var agent: String { self == .plan ? "plan" : "build" }
     var rules: [[String: String]] {
         let edits = ["edit", "write", "patch"].map { ["action": $0, "resource": "*", "effect": "ask"] }
@@ -128,7 +152,27 @@ enum Mode: String, CaseIterable, Identifiable {
     }
 }
 
-enum SideTab: String { case diff, terminal }
+enum SideTab: String, CaseIterable { case diff, files, terminal }
+
+/// a file or folder in the side panel's tree
+struct FileNode: Identifiable, Hashable {
+    let path: String
+    let isDir: Bool
+    var id: String { path }
+    var name: String { URL(fileURLWithPath: path).lastPathComponent }
+    static let noise: Set<String> = [".git", "node_modules", ".next", "dist", "build", "DerivedData", ".venv", "venv", "__pycache__", ".cache", "target", ".turbo", ".pnpm-store", ".DS_Store", "Pods", ".build"]
+    static func children(of dir: String) -> [FileNode] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        var out: [FileNode] = []
+        for n in names where !noise.contains(n) && !(n.hasPrefix(".") && n != ".github" && n != ".env.example") {
+            var isDir: ObjCBool = false
+            let p = dir + "/" + n
+            FileManager.default.fileExists(atPath: p, isDirectory: &isDir)
+            out.append(FileNode(path: p, isDir: isDir.boolValue))
+        }
+        return out.sorted { a, b in a.isDir != b.isDir ? a.isDir : a.name.localizedStandardCompare(b.name) == .orderedAscending }
+    }
+}
 
 // MARK: the desk's state, fed by the engine's event stream
 
@@ -152,7 +196,8 @@ final class Store: ObservableObject {
     @Published var branch: String?
     @Published var sideOpen = UserDefaults.standard.object(forKey: "sideOpen") as? Bool ?? true { didSet { UserDefaults.standard.set(sideOpen, forKey: "sideOpen") } }
     @Published var sideTab: SideTab = .diff
-    @Published var search = ""
+    @Published var search = "" { didSet { searchRemote() } }
+    @Published var searchHits: Set<String> = []
     @Published var toast: String?
     @Published var cost: [String: Double] = [:]
     @Published var signedIn = API.token != nil
@@ -160,8 +205,19 @@ final class Store: ObservableObject {
     @Published var who: String? = UserDefaults.standard.string(forKey: API.whoKey)
     @Published var authError: String?
     @Published var usage: Usage?
+    /// slash commands the engine offers in the current folder
+    @Published var commands: [Command] = []
+    /// the file open in the side panel's preview
+    @Published var preview: String?
+    @Published var palette = false
+    @Published var sidebar = true
+    @Published var shortcuts = false
+    /// a draft the palette or a suggestion hands to the composer
+    @Published var draftText: String?
+    @Published var onboarded = UserDefaults.standard.bool(forKey: "onboarded") { didSet { UserDefaults.standard.set(onboarded, forKey: "onboarded") } }
 
     private var loaded: Set<String> = []
+    private var searchTask: Task<Void, Never>?
 
     init() {
         projects = (UserDefaults.standard.stringArray(forKey: "projects") ?? []).filter { FileManager.default.fileExists(atPath: $0) }.map(Project.init)
@@ -178,9 +234,10 @@ final class Store: ObservableObject {
     var currentMessages: [Message] { current.flatMap { messages[$0] } ?? [] }
     var currentAsks: [PermissionAsk] { asks.filter { $0.sessionID == current } }
     var isBusy: Bool { current.map { busy.contains($0) } ?? false }
+    var query: String { search.trimmingCharacters(in: .whitespaces).lowercased() }
     func rows(for p: Project) -> [SessionRow] {
-        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
-        return sessions.filter { $0.directory == p.path && $0.parentID == nil && (q.isEmpty || $0.title.lowercased().contains(q)) }.sorted { $0.updated > $1.updated }
+        let q = query
+        return sessions.filter { $0.directory == p.path && $0.parentID == nil && (q.isEmpty || $0.title.lowercased().contains(q) || searchHits.contains($0.id)) }.sorted { $0.updated > $1.updated }
     }
     nonisolated static func short(_ path: String, root: String? = nil) -> String {
         if let root, path == root { return "." }
@@ -199,6 +256,10 @@ final class Store: ObservableObject {
         await loadModels()
         await loadSessions()
         if current == nil, draftProject == nil { draftProject = projects.first?.path }
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--session"), i + 1 < args.count, sessions.contains(where: { $0.id == args[i + 1] }) { open(args[i + 1]) }
+        if let i = args.firstIndex(of: "--side"), i + 1 < args.count, let t = SideTab(rawValue: args[i + 1]) { sideTab = t; sideOpen = true }
+        if let i = args.firstIndex(of: "--file"), i + 1 < args.count { preview = args[i + 1]; sideTab = .files; sideOpen = true }
         await refreshSide()
         if let i = CommandLine.arguments.firstIndex(of: "--prompt"), i + 1 < CommandLine.arguments.count { await send(CommandLine.arguments[i + 1]) }
     }
@@ -219,11 +280,41 @@ final class Store: ObservableObject {
         Log.write("model \(model?.key ?? "engine default") of \(models.count)")
     }
 
+    /// the engine pages its lists at 200; follow the cursor until the list ends or it gets silly
+    private func page(_ path: String, query: [(String, String)] = [], pages: Int) async -> [[String: Any]] {
+        var out: [[String: Any]] = []
+        var cursor: String? = nil
+        for _ in 0..<pages {
+            // the order is set on the first page only; a cursor carries it from then on
+            var q = (cursor == nil ? query : query.filter { $0.0 != "order" }) + [("limit", "200")]
+            if let cursor { q.append(("cursor", cursor)) }
+            guard let r = try? await engine.call(path, query: q) as? [String: Any], let list = r["data"] as? [[String: Any]] else { break }
+            out += list
+            guard let next = (r["cursor"] as? [String: Any])?["next"] as? String, !next.isEmpty, !list.isEmpty else { break }
+            cursor = next
+        }
+        return out
+    }
+
     func loadSessions() async {
-        let list = (try? await engine.data("/api/session", query: [("limit", "300")]) as? [[String: Any]]) ?? []
+        let list = await page("/api/session", query: [("order", "desc")], pages: 5)
         sessions = list.compactMap(Store.row)
         for dir in Set(sessions.map(\.directory)) where !projects.contains(where: { $0.path == dir }) && FileManager.default.fileExists(atPath: dir) { projects.append(Project(path: dir)) }
         saveProjects()
+    }
+
+    /// sessions whose contents match, beyond what the titles say
+    private func searchRemote() {
+        searchTask?.cancel()
+        let q = search.trimmingCharacters(in: .whitespaces)
+        guard q.count >= 2 else { searchHits = []; return }
+        searchTask = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let list = (try? await engine.data("/api/session", query: [("search", q), ("limit", "100")]) as? [[String: Any]]) ?? []
+            guard !Task.isCancelled else { return }
+            searchHits = Set(list.compactMap { $0["id"] as? String })
+        }
     }
 
     nonisolated static func row(_ d: [String: Any]) -> SessionRow? {
@@ -240,6 +331,7 @@ final class Store: ObservableObject {
         let p = NSOpenPanel()
         p.canChooseDirectories = true; p.canChooseFiles = false; p.canCreateDirectories = true
         p.prompt = "Open"
+        p.message = "Choose the folder the agent will work in"
         guard p.runModal() == .OK, let u = p.url else { return }
         addProject(u.path)
         newSession(in: u.path)
@@ -257,6 +349,7 @@ final class Store: ObservableObject {
     func newSession(in path: String? = nil) {
         current = nil
         draftProject = path ?? directory ?? projects.first?.path
+        preview = nil
         Task { await refreshSide() }
     }
 
@@ -285,8 +378,26 @@ final class Store: ObservableObject {
         Task { _ = try? await engine.call("/api/session/\(row.id)", method: "PATCH", json: ["title": t]) }
     }
 
+    /// a copy of the session to try something else from the same point
+    func fork(_ row: SessionRow) {
+        Task {
+            guard let d = try? await engine.data("/api/session/\(row.id)/fork", method: "POST", json: [:]) as? [String: Any], let r = Store.row(d) else { toast("Could not fork the session."); return }
+            if !sessions.contains(where: { $0.id == r.id }) { sessions.insert(r, at: 0) }
+            open(r.id)
+        }
+    }
+
+    /// ask the engine to fold the session's history into a summary, keeping the context small
+    func compact() {
+        guard let id = current else { return }
+        Task {
+            do { try await engine.call("/api/session/\(id)/compact", method: "POST", json: [:]); toast("Compacting the context") }
+            catch { toast(error.localizedDescription) }
+        }
+    }
+
     func loadMessages(_ id: String) async {
-        guard let list = try? await engine.data("/api/session/\(id)/message", query: [("limit", "400")]) as? [[String: Any]] else { return }
+        let list = await page("/api/session/\(id)/message", query: [("order", "asc")], pages: 10)
         let sorted = list.sorted { (($0["time"] as? [String: Any])?["created"] as? Double ?? 0) < (($1["time"] as? [String: Any])?["created"] as? Double ?? 0) }
         var out: [Message] = []
         for m in sorted {
@@ -320,6 +431,8 @@ final class Store: ObservableObject {
             case "idle":
                 if m["outcome"] as? String == "failed" { out.append(Message(id: mid, role: .notice, text: Store.errorText(m["error"]).nilIfEmpty ?? "The run failed.", at: at)) }
                 if m["outcome"] as? String == "interrupted" { out.append(Message(id: mid, role: .notice, text: "Stopped.", at: at)) }
+            case "compaction":
+                out.append(Message(id: mid, role: .notice, text: "Context compacted.", at: at))
             default: break
             }
         }
@@ -330,11 +443,26 @@ final class Store: ObservableObject {
 
     // MARK: talking to the agent
 
+    /// files the message points at with @path, sent along as attachments so the agent reads them first
+    private func attachments(in text: String, root: String) -> [[String: Any]] {
+        var out: [[String: Any]] = []
+        let ns = text as NSString
+        guard let re = try? NSRegularExpression(pattern: #"(?<![\w/])@([\w./\-]+)"#) else { return [] }
+        for m in re.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let rel = ns.substring(with: m.range(at: 1))
+            let abs = rel.hasPrefix("/") ? rel : root + "/" + rel
+            guard FileManager.default.fileExists(atPath: abs) else { continue }
+            out.append(["uri": URL(fileURLWithPath: abs).absoluteString, "name": URL(fileURLWithPath: abs).lastPathComponent,
+                        "mention": ["start": m.range.location, "end": m.range.location + m.range.length, "text": ns.substring(with: m.range)]])
+        }
+        return out
+    }
+
     func send(_ raw: String) async {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, engine.state == .ready else { return }
         // models run through lamport.si on the member's own token, so a session starts signed in
-        guard signedIn else { toast("Sign in to start."); signIn(); return }
+        guard signedIn || model?.isLocal == true else { toast("Sign in to start."); signIn(); return }
         var sid = current
         if sid == nil {
             guard let dir = draftProject else { toast("Open a folder first."); return }
@@ -348,12 +476,22 @@ final class Store: ObservableObject {
                 loaded.insert(row.id)
                 current = row.id; draftProject = nil
                 sid = row.id
+                onboarded = true
             } catch { toast(error.localizedDescription); return }
         }
         guard let id = sid else { return }
         busy.insert(id)
-        do { try await engine.call("/api/session/\(id)/prompt", method: "POST", json: ["text": text]) }
-        catch { busy.remove(id); toast(error.localizedDescription) }
+        do {
+            // "/review" and friends go to the engine's command runner; everything else is a prompt
+            if text.hasPrefix("/"), let name = text.dropFirst().components(separatedBy: " ").first, commands.contains(where: { $0.name == name }) {
+                let rest = text.dropFirst(name.count + 1).trimmingCharacters(in: .whitespaces)
+                try await engine.call("/api/session/\(id)/command", method: "POST", json: ["name": name, "text": rest])
+            } else {
+                var body: [String: Any] = ["text": text]
+                if let dir = directory { let files = attachments(in: text, root: dir); if !files.isEmpty { body["files"] = files } }
+                try await engine.call("/api/session/\(id)/prompt", method: "POST", json: body)
+            }
+        } catch { busy.remove(id); toast(error.localizedDescription) }
     }
 
     func stop() {
@@ -376,6 +514,19 @@ final class Store: ObservableObject {
         guard let id = current else { return }
         _ = try? await engine.call("/api/session/\(id)", method: "PATCH", json: ["permissions": mode.rules])
         _ = try? await engine.call("/api/session/\(id)/agent", method: "POST", json: ["agent": mode.agent])
+    }
+
+    /// files in the folder whose path contains `query`, for the composer's @ menu
+    func findFiles(_ query: String) async -> [String] {
+        guard let dir = directory else { return [] }
+        let list = (try? await engine.data("/api/fs/find", query: [("location[directory]", dir), ("query", query), ("type", "file"), ("limit", "12")]) as? [[String: Any]]) ?? []
+        return list.compactMap { $0["path"] as? String }
+    }
+
+    func loadCommands() async {
+        guard let dir = directory else { commands = []; return }
+        let list = (try? await engine.data("/api/command", query: [("location[directory]", dir)]) as? [[String: Any]]) ?? []
+        commands = list.compactMap { d in (d["name"] as? String).map { Command(name: $0, description: d["description"] as? String ?? "") } }
     }
 
     // MARK: the lamport account
@@ -410,7 +561,7 @@ final class Store: ObservableObject {
                     guard signingIn else { return }
                     let r = try await API.call("/api/device/\(code)")
                     guard let t = r["token"] as? String else { continue }
-                    Keychain.set(t, for: API.tokenKey)
+                    Keychain.set(t, for: API.tokenKey); API.forgetToken()
                     who = (r["who"] as? String)?.nilIfEmpty
                     UserDefaults.standard.set(who, forKey: API.whoKey)
                     signedIn = true
@@ -430,7 +581,7 @@ final class Store: ObservableObject {
 
     func signOut(local: Bool = false) {
         if !local, API.token != nil { let r = API.request("/api/device/signout", method: "POST", json: [:]); Task { _ = try? await URLSession.shared.data(for: r) } }
-        Keychain.delete(API.tokenKey)
+        Keychain.delete(API.tokenKey); API.forgetToken()
         UserDefaults.standard.removeObject(forKey: API.whoKey)
         signedIn = false; who = nil; usage = nil
         if model?.isLamport == true { UserDefaults.standard.removeObject(forKey: "model") }
@@ -518,8 +669,10 @@ final class Store: ObservableObject {
 
     // MARK: the side panel
 
+    private var sideFor: String?
     func refreshSide() async {
-        guard let dir = directory else { diffs = []; branch = nil; return }
+        guard let dir = directory else { diffs = []; branch = nil; commands = []; return }
+        if sideFor != dir { if sideFor != nil { preview = nil }; sideFor = dir; await loadCommands() }
         let vcs = try? await engine.data("/api/vcs", query: [("location[directory]", dir)]) as? [String: Any]
         branch = vcs?["branch"] as? String
         do {
@@ -532,6 +685,41 @@ final class Store: ObservableObject {
         }
     }
     var diffTotals: (add: Int, del: Int) { diffs.reduce((0, 0)) { ($0.0 + $1.additions, $0.1 + $1.deletions) } }
+
+    /// put one file back the way git has it; a new file goes to the trash
+    func revert(_ d: FileDiff) {
+        guard let dir = directory else { return }
+        let abs = d.file.hasPrefix("/") ? d.file : dir + "/" + d.file
+        if d.status == "added" {
+            try? FileManager.default.trashItem(at: URL(fileURLWithPath: abs), resultingItemURL: nil)
+        } else {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["checkout", "--", d.file]
+            p.currentDirectoryURL = URL(fileURLWithPath: dir)
+            p.standardOutput = nil; p.standardError = nil
+            try? p.run(); p.waitUntilExit()
+        }
+        toast("Reverted \(URL(fileURLWithPath: d.file).lastPathComponent)")
+        Task { await refreshSide() }
+    }
+
+    func revertAll() {
+        for d in diffs { revert(d) }
+    }
+
+    func openFile(_ rel: String) {
+        guard let dir = directory else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: rel.hasPrefix("/") ? rel : dir + "/" + rel))
+    }
+    func revealFile(_ rel: String) {
+        guard let dir = directory else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: rel.hasPrefix("/") ? rel : dir + "/" + rel)])
+    }
+    func openInTerminal(_ path: String) {
+        let u = URL(fileURLWithPath: path)
+        if let term = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") { NSWorkspace.shared.open([u], withApplicationAt: term, configuration: NSWorkspace.OpenConfiguration()) }
+    }
 
     func toast(_ s: String) {
         toast = s
