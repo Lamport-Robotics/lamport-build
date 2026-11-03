@@ -6,6 +6,7 @@ import Sparkle
 struct LamportBuildApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var store = Store()
+    init() { Theme.registerFonts() }
     var body: some Scene {
         WindowGroup {
             Desk()
@@ -33,16 +34,28 @@ struct DeskCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Session") { store.newSession() }.keyboardShortcut("n")
             Button("Open Folder…") { store.pickFolder() }.keyboardShortcut("o")
+            Divider()
+            Button("Commands…") { store.palette.toggle() }.keyboardShortcut("k")
         }
         CommandMenu("Session") {
             Button("Stop") { store.stop() }.keyboardShortcut(".").disabled(!store.isBusy)
+            Button("Compact Context") { store.compact() }.disabled(store.current == nil)
+            Button("Fork Session") { if let r = store.currentRow { store.fork(r) } }.disabled(store.current == nil)
             Divider()
             ForEach(Mode.allCases) { m in Button(m.title) { store.mode = m }.keyboardShortcut(KeyEquivalent(Character("\(Mode.allCases.firstIndex(of: m)! + 1)")), modifiers: [.command, .shift]) }
         }
         CommandMenu("View") {
+            Button(store.sidebar ? "Hide Sidebar" : "Show Sidebar") { store.sidebar.toggle() }.keyboardShortcut("\\", modifiers: [.command])
             Button(store.sideOpen ? "Hide Side Panel" : "Show Side Panel") { store.sideOpen.toggle() }.keyboardShortcut("b", modifiers: [.command, .option])
+            Divider()
             Button("Diff") { store.sideOpen = true; store.sideTab = .diff }.keyboardShortcut("d", modifiers: [.command, .shift])
+            Button("Files") { store.sideOpen = true; store.sideTab = .files }.keyboardShortcut("e", modifiers: [.command, .shift])
             Button("Terminal") { store.sideOpen = true; store.sideTab = .terminal }.keyboardShortcut("j", modifiers: [.command])
+        }
+        CommandGroup(replacing: .help) {
+            Button("Keyboard Shortcuts") { store.shortcuts = true }.keyboardShortcut("/", modifiers: [.command])
+            Button("Lamport Build on GitHub") { NSWorkspace.shared.open(URL(string: "https://github.com/Lamport-Robotics/lamport-build")!) }
+            Button("Show Log File") { NSWorkspace.shared.activateFileViewerSelecting([Log.file]) }
         }
     }
 }
@@ -63,6 +76,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             src.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.store?.engine.stop() }; exit(0) }
             src.resume()
             signals.append(src)
+        }
+    }
+    /// a folder dropped on the dock icon opens as a project
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for u in urls {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            MainActor.assumeIsolated { store?.addProject(u.path); store?.newSession(in: u.path) }
         }
     }
     func applicationWillTerminate(_ notification: Notification) { MainActor.assumeIsolated { store?.engine.stop() } }
