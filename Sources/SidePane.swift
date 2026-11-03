@@ -317,77 +317,26 @@ struct Preview: View {
     }
 }
 
-/// a read-only text view that colours code and shows line numbers
-struct CodeText: NSViewRepresentable {
+/// a read-only view of a file, coloured by its kind, with a line gutter
+struct CodeText: View {
     var text: String; var lang: String
-    func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.autohidesScrollers = true
-        scroll.drawsBackground = false
-        let tv = NSTextView()
-        tv.isEditable = false; tv.isSelectable = true; tv.isRichText = false
-        tv.drawsBackground = false
-        tv.font = Theme.nsMono(11.5)
-        tv.textContainerInset = NSSize(width: 10, height: 10)
-        tv.isHorizontallyResizable = true; tv.isVerticallyResizable = true
-        tv.textContainer?.widthTracksTextView = false
-        tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        tv.autoresizingMask = [.width]
-        scroll.documentView = tv
-        scroll.hasVerticalRuler = true
-        scroll.rulersVisible = true
-        let ruler = LineNumbers(scrollView: scroll, orientation: .verticalRuler)
-        ruler.clientView = tv
-        scroll.verticalRulerView = ruler
-        fill(tv)
-        return scroll
-    }
-    func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let tv = scroll.documentView as? NSTextView, tv.string != text else { return }
-        fill(tv)
-        scroll.verticalRulerView?.needsDisplay = true
-    }
-    private func fill(_ tv: NSTextView) {
-        tv.string = text
-        guard let s = tv.textStorage else { return }
-        s.addAttribute(.font, value: Theme.nsMono(11.5), range: NSRange(location: 0, length: s.length))
-        let p = NSMutableParagraphStyle(); p.lineSpacing = 2.5
-        s.addAttribute(.paragraphStyle, value: p, range: NSRange(location: 0, length: s.length))
-        Highlighter.apply(s, lang: lang)
-    }
-}
-
-/// the gutter beside a code view
-final class LineNumbers: NSRulerView {
-    override init(scrollView: NSScrollView?, orientation: NSRulerView.Orientation) {
-        super.init(scrollView: scrollView, orientation: orientation)
-        ruleThickness = 40
-    }
-    required init(coder: NSCoder) { fatalError() }
-    override func drawHashMarksAndLabels(in rect: NSRect) {
-        guard let tv = clientView as? NSTextView, let lm = tv.layoutManager, let tc = tv.textContainer else { return }
-        NSColor(Theme.side).setFill(); rect.fill()
-        let font = Theme.nsMono(10)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor(Theme.dim)]
-        let visible = tv.visibleRect
-        let glyphs = lm.glyphRange(forBoundingRect: visible, in: tc)
-        let chars = lm.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
-        let ns = tv.string as NSString
-        var line = 1
-        var i = 0
-        while i < chars.location { if ns.character(at: i) == 10 { line += 1 }; i += 1 }
-        var pos = chars.location
-        while pos < NSMaxRange(chars) || (pos == 0 && ns.length == 0) {
-            let lineRange = ns.lineRange(for: NSRange(location: pos, length: 0))
-            let g = lm.glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
-            var r = lm.boundingRect(forGlyphRange: g, in: tc)
-            r.origin.y += tv.textContainerInset.height - visible.origin.y
-            let s = NSAttributedString(string: "\(line)", attributes: attrs)
-            s.draw(at: NSPoint(x: ruleThickness - s.size().width - 8, y: r.origin.y + (r.height - s.size().height) / 2 - 1))
-            line += 1
-            pos = NSMaxRange(lineRange)
-            if lineRange.length == 0 { break }
+    var body: some View {
+        let lines = text.components(separatedBy: "\n")
+        let width = CGFloat(String(lines.count).count) * 7 + 14
+        GeometryReader { g in
+        ScrollView([.vertical, .horizontal]) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
+                    HStack(alignment: .top, spacing: 0) {
+                        Text("\(i + 1)").font(Theme.mono(10.5)).foregroundStyle(Theme.dim).frame(width: width, alignment: .trailing).padding(.trailing, 12)
+                        Text(Highlighter.attributed(line.isEmpty ? " " : line, lang: lang, font: Theme.mono(11.5))).lineLimit(1).fixedSize(horizontal: true, vertical: false).textSelection(.enabled)
+                    }
+                    .padding(.vertical, 1.5)
+                }
+            }
+            .padding(.vertical, 8).padding(.trailing, 16)
+            .frame(minWidth: g.size.width, minHeight: g.size.height, alignment: .topLeading)
+        }
         }
     }
 }
