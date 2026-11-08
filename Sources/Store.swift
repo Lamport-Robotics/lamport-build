@@ -243,7 +243,7 @@ final class Store: ObservableObject {
         if let root, path == root { return "." }
         if let root, path.hasPrefix(root + "/") { return String(path.dropFirst(root.count + 1)) }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+        return path == home || path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
     }
 
     // MARK: start up
