@@ -94,14 +94,15 @@ struct Markdown: View {
             let t = line.trimmingCharacters(in: .whitespaces)
             i += 1
             if code != nil {
-                if t.hasPrefix(fence) { out.append(.code(lang, code!.joined(separator: "\n"))); code = nil } else { code!.append(line) }
+                // only a bare run of the same character, at least as long, closes: ```` can hold ``` and ```python is content
+                if let run = fenceRun(t), run.first == fence.first, run.count >= fence.count, run.count == t.count { out.append(.code(lang, code!.joined(separator: "\n"))); code = nil } else { code!.append(line) }
                 continue
             }
-            if t.hasPrefix("```") || t.hasPrefix("~~~") {
+            if let run = fenceRun(t) {
                 flush()
-                fence = String(t.prefix(3))
+                fence = run
                 code = []
-                lang = String(t.dropFirst(3)).trimmingCharacters(in: .whitespaces).components(separatedBy: " ").first ?? ""
+                lang = String(t.dropFirst(run.count)).trimmingCharacters(in: .whitespaces).components(separatedBy: " ").first ?? ""
                 continue
             }
             if t.isEmpty { flush(); continue }
@@ -149,6 +150,14 @@ struct Markdown: View {
         if let code { out.append(.code(lang, code.joined(separator: "\n"))) }
         flush()
         return out
+    }
+
+    /// the backticks or tildes a code fence starts with, three or more of one kind; a backtick fence's info has no backticks
+    static func fenceRun(_ t: String) -> String? {
+        guard let c = t.first, c == "`" || c == "~" else { return nil }
+        let run = t.prefix(while: { $0 == c })
+        guard run.count >= 3, c == "~" || !t.dropFirst(run.count).contains("`") else { return nil }
+        return String(run)
     }
 
     static func isSeparator(_ line: String) -> Bool {
