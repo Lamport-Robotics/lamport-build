@@ -9,7 +9,12 @@ enum Log {
         let line = "\(ISO8601DateFormatter().string(from: Date())) \(s)\n"
         q.async {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            if let size = try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int, size > 2_000_000 { try? FileManager.default.moveItem(at: file, to: dir.appendingPathComponent("app.1.log")) }
+            if let size = try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int, size > 2_000_000 {
+                // moveItem won't replace an existing file: without the remove, every rotation after the first fails and app.log grows without end
+                let old = dir.appendingPathComponent("app.1.log")
+                try? FileManager.default.removeItem(at: old)
+                try? FileManager.default.moveItem(at: file, to: old)
+            }
             if let h = try? FileHandle(forWritingTo: file) { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() } else { try? line.write(to: file, atomically: true, encoding: .utf8) }
         }
     }
