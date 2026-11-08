@@ -418,7 +418,7 @@ struct Palette: View {
                         .onSubmit { run() }
                         .onChange(of: query) { _, _ in pick = 0 }
                         .onKeyPress(.upArrow) { pick = max(0, pick - 1); return .handled }
-                        .onKeyPress(.downArrow) { pick = min(shown.count - 1, pick + 1); return .handled }
+                        .onKeyPress(.downArrow) { pick = max(0, min(shown.count - 1, pick + 1)); return .handled }
                         .onKeyPress(.escape) { store.palette = false; return .handled }
                     Keys(keys: "esc")
                 }
@@ -460,7 +460,7 @@ struct Palette: View {
     }
     func run() {
         let list = shown
-        guard pick < list.count else { return }
+        guard list.indices.contains(pick) else { return } // ↓ with nothing matching used to leave pick at -1
         store.palette = false
         list[pick].run()
     }
