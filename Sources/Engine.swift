@@ -112,7 +112,7 @@ final class Engine: ObservableObject {
 
     func request(_ path: String, method: String = "GET", query: [(String, String)] = [], json: Any? = nil) -> URLRequest {
         var c = URLComponents(url: base.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
-        if !query.isEmpty { c.queryItems = query.map { URLQueryItem(name: $0.0, value: $0.1) } }
+        if !query.isEmpty { c.queryItems = query.map { URLQueryItem(name: $0.0, value: $0.1) }; Engine.encodePlus(&c) }
         var r = URLRequest(url: c.url!)
         r.httpMethod = method
         r.setValue(auth, forHTTPHeaderField: "Authorization")
@@ -181,7 +181,14 @@ final class Engine: ObservableObject {
         var c = URLComponents(url: base.appendingPathComponent("/api/pty/\(id)/connect"), resolvingAgainstBaseURL: false)!
         c.scheme = "ws"
         c.queryItems = [URLQueryItem(name: "location[directory]", value: directory), URLQueryItem(name: "ticket", value: ticket)]
+        Engine.encodePlus(&c)
         return c.url!
+    }
+
+    /// URLComponents leaves a "+" in a query value as it is, and the engine reads the query form-encoded, where "+" is a
+    /// space: a folder called "C++" or a search for "a+b" would arrive as "C  " and "a b". %2B means "+" either way.
+    nonisolated static func encodePlus(_ c: inout URLComponents) {
+        c.percentEncodedQuery = c.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
     }
 
     func resizeTerminal(_ id: String, directory: String, cols: Int, rows: Int) async throws {
