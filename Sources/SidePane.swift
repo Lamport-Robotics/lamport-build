@@ -278,7 +278,7 @@ struct TreeRow: View {
             Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: node.path)) }
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: node.path)]) }
             Button("Copy path") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(node.path, forType: .string) }
-            if !node.isDir { Button("Mention in the composer") { store.draftText = "@" + Store.short(node.path, root: store.directory) + " " } }
+            if !node.isDir { Button("Mention in the composer") { store.draftText = Store.mention(Store.short(node.path, root: store.directory)) + " " } }
         }
         if node.isDir, open {
             ForEach(FileNode.children(of: node.path)) { TreeRow(node: $0, depth: depth + 1) }
@@ -298,7 +298,7 @@ struct Preview: View {
                 Image(systemName: fileIcon(path)).font(.system(size: 11)).foregroundStyle(Theme.dim)
                 Text(rel).font(Theme.mono(11.5)).foregroundStyle(Theme.ink2).lineLimit(1).truncationMode(.head)
                 Spacer()
-                Button { store.draftText = "@" + rel + " " } label: { Image(systemName: "at").font(.system(size: 11.5)).foregroundStyle(Theme.mute) }.buttonStyle(Flat(pad: 5)).help("Mention in the composer")
+                Button { store.draftText = Store.mention(rel) + " " } label: { Image(systemName: "at").font(.system(size: 11.5)).foregroundStyle(Theme.mute) }.buttonStyle(Flat(pad: 5)).help("Mention in the composer")
                 Button { NSWorkspace.shared.open(URL(fileURLWithPath: path)) } label: { Image(systemName: "arrow.up.forward.square").font(.system(size: 11.5)).foregroundStyle(Theme.mute) }.buttonStyle(Flat(pad: 5)).help("Open in the default app")
             }
             .padding(.horizontal, 8).frame(height: 34)

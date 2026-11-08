@@ -578,7 +578,7 @@ struct Composer: View {
             for p in providers {
                 _ = p.loadObject(ofClass: URL.self) { url, _ in
                     guard let url else { return }
-                    DispatchQueue.main.async { text += (text.isEmpty || text.hasSuffix(" ") ? "" : " ") + "@" + Store.short(url.path, root: store.directory) + " " }
+                    DispatchQueue.main.async { text += (text.isEmpty || text.hasSuffix(" ") ? "" : " ") + Store.mention(Store.short(url.path, root: store.directory)) + " " }
                 }
             }
             return true
@@ -612,7 +612,7 @@ struct Composer: View {
             guard !Task.isCancelled else { return }
             let files = await store.findFiles(tok.query)
             guard !Task.isCancelled else { return }
-            suggestions = files.map { Suggestion(id: $0, title: URL(fileURLWithPath: $0).lastPathComponent, detail: $0, icon: fileIcon($0), insert: "@" + $0 + " ") }
+            suggestions = files.map { Suggestion(id: $0, title: URL(fileURLWithPath: $0).lastPathComponent, detail: $0, icon: fileIcon($0), insert: Store.mention($0) + " ") }
         }
     }
     func accept(_ s: Suggestion) {

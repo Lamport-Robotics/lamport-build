@@ -239,6 +239,8 @@ final class Store: ObservableObject {
         let q = query
         return sessions.filter { $0.directory == p.path && $0.parentID == nil && (q.isEmpty || $0.title.lowercased().contains(q) || searchHits.contains($0.id)) }.sorted { $0.updated > $1.updated }
     }
+    /// how the composer writes a mention of `path`: quoted when it has a space, so the whole path is one mention
+    nonisolated static func mention(_ path: String) -> String { path.contains(" ") ? "@\"" + path + "\"" : "@" + path }
     nonisolated static func short(_ path: String, root: String? = nil) -> String {
         if let root, path == root { return "." }
         if let root, path.hasPrefix(root + "/") { return String(path.dropFirst(root.count + 1)) }
@@ -443,14 +445,17 @@ final class Store: ObservableObject {
 
     // MARK: talking to the agent
 
-    /// files the message points at with @path, sent along as attachments so the agent reads them first
+    /// files the message points at with @path, sent along as attachments so the agent reads them first: a path
+    /// relative to the folder, absolute, or under ~/ (what a file dropped from outside the folder reads as), and
+    /// @"…" for one with spaces in it
     private func attachments(in text: String, root: String) -> [[String: Any]] {
         var out: [[String: Any]] = []
         let ns = text as NSString
-        guard let re = try? NSRegularExpression(pattern: #"(?<![\w/])@([\w./\-]+)"#) else { return [] }
+        guard let re = try? NSRegularExpression(pattern: #"(?<![\w/])@(?:"([^"\n]+)"|(~?[\w./\-]+))"#) else { return [] }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
         for m in re.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            let rel = ns.substring(with: m.range(at: 1))
-            let abs = rel.hasPrefix("/") ? rel : root + "/" + rel
+            let rel = ns.substring(with: m.range(at: 1).location != NSNotFound ? m.range(at: 1) : m.range(at: 2))
+            let abs = rel.hasPrefix("/") ? rel : rel.hasPrefix("~/") ? home + rel.dropFirst() : root + "/" + rel
             guard FileManager.default.fileExists(atPath: abs) else { continue }
             out.append(["uri": URL(fileURLWithPath: abs).absoluteString, "name": URL(fileURLWithPath: abs).lastPathComponent,
                         "mention": ["start": m.range.location, "end": m.range.location + m.range.length, "text": ns.substring(with: m.range)]])
