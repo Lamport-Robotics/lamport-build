@@ -514,11 +514,11 @@ struct Composer: View {
                     .textFieldStyle(.plain).font(Theme.sans(13.5)).foregroundStyle(Theme.ink)
                     .lineLimit(tall ? 3...12 : 1...12)
                     .focused($focused)
-                    .onSubmit { if !suggestions.isEmpty { accept(suggestions[pick]) } else { submit() } }
+                    .onSubmit { if !suggestions.isEmpty { accept(suggestions[min(pick, suggestions.count - 1)]) } else { submit() } }
                     .onChange(of: text) { _, _ in refreshSuggestions() }
                     .onKeyPress(.upArrow) { guard !suggestions.isEmpty else { return .ignored }; pick = (pick - 1 + suggestions.count) % suggestions.count; return .handled }
                     .onKeyPress(.downArrow) { guard !suggestions.isEmpty else { return .ignored }; pick = (pick + 1) % suggestions.count; return .handled }
-                    .onKeyPress(.tab) { guard !suggestions.isEmpty else { return .ignored }; accept(suggestions[pick]); return .handled }
+                    .onKeyPress(.tab) { guard !suggestions.isEmpty else { return .ignored }; accept(suggestions[min(pick, suggestions.count - 1)]); return .handled }
                     .onKeyPress(.escape) { guard !suggestions.isEmpty else { return .ignored }; suggestions = []; return .handled }
                     .padding(.top, 2)
                 HStack(spacing: 4) {
